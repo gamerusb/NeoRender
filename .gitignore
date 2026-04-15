@@ -1,0 +1,19 @@
+# Секреты и локальные настройки
+.env
+data/neo_settings.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# Frontend build
+web/dist/
+frontend/node_modules/

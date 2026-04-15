@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "Bash(py run_server.py)",
+      "Bash(py -3 -m pytest --tb=short -q)",
+      "Bash(py -3 run_server.py)",
+      "Bash(python -c ':*)",
+      "Bash(python run_server.py)",
+      "Bash(py -c \"import ast; ast.parse\\(open\\('api_server.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(npx tsc:*)",
+      "Bash(node_modules/.bin/tsc --noEmit)",
+      "Bash(node node_modules/typescript/bin/tsc --noEmit)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(python -m pytest tests/test_main_loop.py -x -q)",
+      "Bash(python3 -m pytest tests/test_main_loop.py -x -q)",
+      "Bash(py -m pytest tests/test_main_loop.py -x -q)",
+      "Bash(curl -s http://127.0.0.1:8766/api/subtitles/nonexistent-id -H 'X-Tenant-ID: default')",
+      "Bash(curl -s http://127.0.0.1:8766/api/subtitles/2d277870-ec1c-4e6c-978b-0b7eb8c9863c -H 'X-Tenant-ID: wrong-tenant')",
+      "Bash(curl -s http://127.0.0.1:8766/ui/)",
+      "Bash(curl:*)",
+      "Bash(taskkill:*)"
+    ]
+  }
+}

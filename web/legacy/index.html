@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NeoRender Uniqualizer v0.2</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <script>
+    (function () {
+      if (new URLSearchParams(location.search).get("embed") === "1") document.body.classList.add("embed");
+    })();
+  </script>
+  <div class="container">
+    <aside class="sidebar">
+      <div class="logo">
+        <div class="logo-icon">N</div>
+        <div class="logo-text">
+          <div class="logo-title">NeoRender</div>
+          <div class="logo-sub">PRO v0.2</div>
+        </div>
+      </div>
+
+      <div class="nav-item active" data-section="dashboard">
+        <span class="nav-icon">⚡</span>
+        <span>Главная</span>
+      </div>
+      <div class="nav-item" data-section="uniqualizer">
+        <span class="nav-icon">🎬</span>
+        <span>Уникализатор</span>
+      </div>
+      <div class="nav-item" data-section="accounts">
+        <span class="nav-icon">👤</span>
+        <span>Аккаунты</span>
+      </div>
+      <div class="nav-item" data-section="uploads">
+        <span class="nav-icon">🎥</span>
+        <span>Залив видео</span>
+      </div>
+      <div class="nav-item" data-section="analytics">
+        <span class="nav-icon">📊</span>
+        <span>Аналитика</span>
+      </div>
+      <div class="nav-item nav-hidden" data-section="warmup" title="Скоро">
+        <span class="nav-icon">🔥</span>
+        <span>Прогрев</span>
+      </div>
+      <div class="nav-item" data-section="settings">
+        <span class="nav-icon">🔧</span>
+        <span>Настройки</span>
+      </div>
+
+      <div class="antidetect-select">
+        <label class="antidetect-label" for="tenant-id-select">Tenant</label>
+        <select id="tenant-id-select">
+          <option value="default">default</option>
+        </select>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="header">
+        <div class="header-left">
+          <div class="header-title">NeoRender v0.2</div>
+          <div class="header-badge">КОРЕЙСКИЙ ПРОРЫВ</div>
+        </div>
+        <div class="header-right">
+          <div class="icon-btn" id="refresh-app-btn">⟳</div>
+          <div class="icon-btn" id="open-docs-btn">?</div>
+          <div class="user-icon" id="tenant-badge">D</div>
+        </div>
+      </div>
+
+      <div class="tabs" id="top-tabs">
+        <div class="tab active" data-target="uniqualizer">🎬 Уникализатор</div>
+        <div class="tab" data-target="analytics">📊 Аналитика</div>
+        <div class="tab tab-hidden" data-target="warmup">🔥 Прогрев</div>
+      </div>
+
+      <div id="main-stack">
+        <section class="side-panel visible" data-panel="dashboard">
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-icon">👤</div>
+              <div class="stat-value" id="stat-profiles">0</div>
+              <div class="stat-label">Профили</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon">🧾</div>
+              <div class="stat-value" id="stat-tasks">0</div>
+              <div class="stat-label">Задачи</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon">⏳</div>
+              <div class="stat-value" id="stat-pending">0</div>
+              <div class="stat-label">В очереди</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon">✅</div>
+              <div class="stat-value" id="stat-success">0</div>
+              <div class="stat-label">Успешно</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon">👁️</div>
+              <div class="stat-value" id="stat-views">0</div>
+              <div class="stat-label">Просмотры</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon">⚠️</div>
+              <div class="stat-value" id="stat-errors">0</div>
+              <div class="stat-label">Ошибки</div>
+            </div>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <div class="card-dark">
+                <div class="card-title">Состояние системы</div>
+                <div id="system-status-lines"></div>
+                <div class="section-actions">
+                  <button class="action-btn" id="dashboard-verify-ads">Проверить AdsPower</button>
+                  <button class="action-btn" id="dashboard-sync-ads">Синхр. профили</button>
+                  <button class="action-btn" id="dashboard-start-pipeline">Запустить очередь</button>
+                </div>
+              </div>
+
+              <div class="section-title">Последние задачи</div>
+              <div class="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Видео</th>
+                      <th>Профиль</th>
+                      <th>Статус</th>
+                      <th>Ошибка</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dashboard-tasks-body"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div>
+              <div class="card-dark">
+                <div class="card-title">Быстрые действия</div>
+                <div class="toolbar">
+                  <button class="action-btn" id="go-unique-btn">К уникализатору</button>
+                  <button class="action-btn" id="go-accounts-btn">Открыть аккаунты</button>
+                  <button class="action-btn" id="go-settings-btn">Настройки</button>
+                </div>
+                <div class="info-box">
+                  <div class="info-label">Пайплайн</div>
+                  <div class="info-value" id="pipeline-status-text">Очередь не запущена</div>
+                  <div class="info-sub" id="tenant-status-text">Tenant: default</div>
+                </div>
+                <div class="info-box">
+                  <div class="info-label">ИИ (Groq)</div>
+                  <div class="info-value" id="groq-status-text">Проверяем...</div>
+                </div>
+                <div class="info-box">
+                  <div class="info-label">AdsPower API</div>
+                  <div class="info-value mono" id="ads-base-text">http://127.0.0.1:50325</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="side-panel side-panel-uniqualizer" data-panel="uniqualizer">
+          <input type="file" id="video-input" class="hidden-input" multiple accept=".mp4,.mov,.avi,.mkv,.webm">
+          <canvas id="thumb-canvas" style="display:none"></canvas>
+
+          <!-- Шаги-индикаторы -->
+          <div class="wizard-steps">
+            <div class="wizard-step active" id="wstep-1">
+              <div class="wstep-num">1</div>
+              <div class="wstep-label">Загрузи видео</div>
+            </div>
+            <div class="wizard-divider"></div>
+            <div class="wizard-step" id="wstep-2">
+              <div class="wstep-num">2</div>
+              <div class="wstep-label">Выбери стиль</div>
+            </div>
+            <div class="wizard-divider"></div>
+            <div class="wizard-step" id="wstep-3">
+              <div class="wstep-num">3</div>
+              <div class="wstep-label">Слой и текст</div>
+            </div>
+            <div class="wizard-divider"></div>
+            <div class="wizard-step" id="wstep-4">
+              <div class="wstep-num">4</div>
+              <div class="wstep-label">Запуск</div>
+            </div>
+          </div>
+
+          <div class="uniq-layout">
+
+            <!-- ══ ЛЕВАЯ КОЛОНКА: шаги ══ -->
+            <div class="uniq-left">
+
+              <!-- ── Шаг 1: Загрузка ── -->
+              <div class="step-block">
+                <div class="step-block-hdr">
+                  <span class="step-circle">1</span>
+                  <span class="step-block-title">Загрузи видео</span>
+                </div>
+                <div class="drop-zone" id="drop-zone">
+                  <div class="drop-icon">📁</div>
+                  <div class="drop-text">Перетащите видео сюда</div>
+                  <div class="drop-hint">или нажмите · MP4, MOV, AVI, MKV, WEBM</div>
+                </div>
+                <div class="file-list" id="selected-files-list">
+                  <div class="empty-state">Файлы не выбраны</div>
+                </div>
+                <div class="step-actions-row">
+                  <button class="action-btn" id="pick-files-btn">Выбрать файлы</button>
+                  <button class="action-btn" id="clear-files-btn">Очистить</button>
+                </div>
+              </div>
+
+              <!-- ── Шаг 2: Стиль ── -->
+              <div class="step-block">
+                <div class="step-block-hdr">
+                  <span class="step-circle">2</span>
+                  <span class="step-block-title">Пресет обработки</span>
+                </div>
+                <div class="presets" id="preset-list">
+                  <div class="preset-btn" data-preset="standard">
+                    <div class="tmpl-mini tmpl-mini-default"></div>
+                    <div class="preset-name">Стандарт</div>
+                    <div class="preset-desc">Быстро · CRF 26</div>
+                  </div>
+                  <div class="preset-btn" data-preset="soft">
+                    <div class="tmpl-mini tmpl-mini-soft"></div>
+                    <div class="preset-name">Мягко</div>
+                    <div class="preset-desc">Почти оригинал · CRF 22</div>
+                  </div>
+                  <div class="preset-btn active-preset" data-preset="deep">
+                    <div class="tmpl-mini tmpl-mini-deep"></div>
+                    <div class="preset-name">Глубокий</div>
+                    <div class="preset-desc">Баланс · CRF 23</div>
+                  </div>
+                  <div class="preset-btn" data-preset="ultra">
+                    <div class="tmpl-mini tmpl-mini-ultra"></div>
+                    <div class="preset-name">Ультра</div>
+                    <div class="preset-desc">Макс · CRF 20</div>
+                  </div>
+                </div>
+                <div class="preset-hint" id="preset-hint-text">Глубокий: saturation 1.2–1.8, CRF 23, audio 192k</div>
+
+                <div class="step-block-hdr" style="margin-top:18px;">
+                  <span class="step-circle dim">2</span>
+                  <span class="step-block-title">Шаблон монтажа</span>
+                </div>
+                <div class="tmpl-grid" id="template-list">
+                  <div class="tmpl-btn active-preset" data-tmpl="default">
+                    <div class="tmpl-mockup">
+                      <div class="tmk tmk-default"><div class="tmk-vid"></div></div>
+                    </div>
+                    <div class="tmpl-name">Стандарт</div>
+                  </div>
+                  <div class="tmpl-btn" data-tmpl="reaction">
+                    <div class="tmpl-mockup">
+                      <div class="tmk tmk-reaction"><div class="tmk-vid"></div><div class="tmk-vid dim"></div></div>
+                    </div>
+                    <div class="tmpl-name">Реакция</div>
+                  </div>
+                  <div class="tmpl-btn" data-tmpl="news">
+                    <div class="tmpl-mockup">
+                      <div class="tmk tmk-news"><div class="tmk-vid"></div><div class="tmk-bar"></div></div>
+                    </div>
+                    <div class="tmpl-name">Новости</div>
+                  </div>
+                  <div class="tmpl-btn" data-tmpl="story">
+                    <div class="tmpl-mockup">
+                      <div class="tmk tmk-story"><div class="tmk-vid narrow"></div></div>
+                    </div>
+                    <div class="tmpl-name">Story</div>
+                  </div>
+                  <div class="tmpl-btn" data-tmpl="ugc">
+                    <div class="tmpl-mockup">
+                      <div class="tmk tmk-ugc"><div class="tmk-vid vgn"></div></div>
+                    </div>
+                    <div class="tmpl-name">UGC</div>
+                  </div>
+                </div>
+                <div class="preset-hint" id="template-hint-text">Стандарт: один поток + прозрачный overlay</div>
+
+                <div class="preset-hint" style="margin-top:12px;">
+                  Текст на кадр: на дашборде <strong>«AI превью текста»</strong> → в превью кнопка вставки в <strong>шаг 3</strong>.
+                </div>
+              </div>
+
+              <!-- ── Шаг 3: Слой + текст ── -->
+              <div class="step-block step-block--layer">
+                <div class="step-block-hdr">
+                  <span class="step-circle">3</span>
+                  <span class="step-block-title">Слой поверх ролика</span>
+                </div>
+                <p class="step-lead">Загрузите <strong>PNG / JPG</strong> или <strong>видео</strong> (MP4, MOV…). По умолчанию берётся файл <span class="mono">data/overlay.png</span>, если не загружали свой.</p>
+                <input type="file" id="overlay-file-input" class="hidden-input" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp,.mp4,.mov,.webm,.mkv,.avi">
+                <div class="step-actions-row">
+                  <button type="button" class="action-btn" id="overlay-pick-btn">Выбрать файл слоя</button>
+                  <button type="button" class="action-btn secondary" id="overlay-reset-btn">Сброс на overlay.png</button>
+                </div>
+                <div class="overlay-file-pill" id="overlay-file-pill">Слой: стандартный data/overlay.png</div>
+
+                <div class="input-group" style="margin-top:14px;">
+                  <label class="label-dark" for="overlay-mode-select">Как положить слой</label>
+                  <select class="input-dark" id="overlay-mode-select">
+                    <option value="on_top">Поверх основного видео</option>
+                    <option value="under_video">Под видео (подложка на весь кадр)</option>
+                  </select>
+                </div>
+                <div class="input-group" style="margin-top:10px;">
+                  <label class="label-dark" for="overlay-position-select">Позиция (только «обычное» наложение и режим «поверх»)</label>
+                  <select class="input-dark" id="overlay-position-select">
+                    <option value="center">По центру</option>
+                    <option value="top">Сверху</option>
+                    <option value="bottom">Снизу</option>
+                    <option value="top_left">Верхний левый угол</option>
+                    <option value="top_right">Верхний правый</option>
+                    <option value="bottom_left">Нижний левый</option>
+                    <option value="bottom_right">Нижний правый</option>
+                  </select>
+                </div>
+                <div class="input-group" style="margin-top:10px;">
+                  <label class="label-dark" for="overlay-blend-select">Режим смешивания</label>
+                  <select class="input-dark" id="overlay-blend-select"></select>
+                  <div class="inline-note" style="margin-top:6px;">Для режимов кроме «Обычное» слой масштабируется на весь кадр (как клип-оверлей). <strong>Screen</strong> — осветляет тёмные области.</div>
+                </div>
+                <div class="input-group" style="margin-top:10px;">
+                  <label class="label-dark" for="overlay-opacity-range">Непрозрачность слоя: <span id="overlay-opacity-val">100</span>%</label>
+                  <input class="input-dark" type="range" min="5" max="100" value="100" id="overlay-opacity-range">
+                </div>
+
+                <div class="step-block-hdr" style="margin-top:18px;">
+                  <span class="step-circle dim">3</span>
+                  <span class="step-block-title">Текст и субтитры</span>
+                </div>
+                <div class="input-group">
+                  <label class="label-dark" for="subtitle-style-select">Стиль (SRT + короткая строка на кадре)</label>
+                  <select class="input-dark" id="subtitle-style-select">
+                    <option value="default">Обычный</option>
+                    <option value="readable">Крупнее и с обводкой</option>
+                  </select>
+                </div>
+                <div class="input-group" style="margin-top:10px;">
+                  <label class="label-dark" for="subtitle-input">Текст на видео</label>
+                  <textarea class="input-dark" id="subtitle-input" rows="3" placeholder="Короткая строка или CTA; можно вставить из AI-превью на дашборде."></textarea>
+                </div>
+                <div class="input-group" style="margin-top:10px;">
+                  <label class="label-dark">SRT (таймкоды поверх ролика)</label>
+                  <p class="inline-note" style="margin:0 0 8px;">Нужен FFmpeg с libass. Файл сохраняется в ваш каталог загрузок tenant.</p>
+                  <input type="file" id="srt-file-input" class="hidden-input" accept=".srt,text/plain">
+                  <div class="step-actions-row">
+                    <button type="button" class="action-btn secondary" id="srt-pick-btn">Выбрать .srt</button>
+                    <button type="button" class="action-btn secondary" id="srt-clear-btn">Сбросить SRT</button>
+                  </div>
+                  <div class="overlay-file-pill" id="srt-file-pill">SRT не выбран</div>
+                </div>
+
+                <!-- Гео (свёрнуто) -->
+                <div class="geo-collapsible">
+                  <div class="geo-collapser" id="geo-collapse-btn">
+                    <span>🌏 Гео-инъекция метаданных</span>
+                    <span class="geo-collapse-arrow" id="geo-arrow">▶</span>
+                  </div>
+                  <div class="geo-body" id="geo-body" style="display:none;">
+                    <div class="toggle" style="margin-top:10px;">
+                      <span class="toggle-label">Включить гео-инъекцию</span>
+                      <div class="toggle-switch" id="geo-toggle"><div class="toggle-knob"></div></div>
+                    </div>
+                    <div class="input-group" style="margin-top:10px;">
+                      <label class="label-dark" for="device-select">Отпечаток устройства</label>
+                      <select id="device-select">
+                        <option value="Samsung SM-S928N">Samsung Galaxy S24 Ultra</option>
+                        <option value="Samsung SM-S911B">Samsung Galaxy S23</option>
+                        <option value="Google Pixel 9">Google Pixel 9</option>
+                        <option value="Google Pixel 8">Google Pixel 8</option>
+                        <option value="Google Pixel 7">Google Pixel 7</option>
+                        <option value="2211133G">Xiaomi 13 (глобальная)</option>
+                        <option value="iPhone 16 Pro">Apple iPhone 16 Pro</option>
+                        <option value="iPhone 15 Pro">Apple iPhone 15 Pro</option>
+                        <option value="iPhone 14">Apple iPhone 14</option>
+                      </select>
+                    </div>
+                    <div class="input-grid">
+                      <div class="input-group">
+                        <label class="label-dark" for="geo-city-select">Город</label>
+                        <select id="geo-city-select">
+                          <option value="busan">Busan, KR</option>
+                          <option value="seoul">Seoul, KR</option>
+                          <option value="incheon">Incheon, KR</option>
+                        </select>
+                      </div>
+                      <div class="input-group">
+                        <label class="label-dark" for="geo-jitter-range">Джиттер GPS</label>
+                        <input class="input-dark" type="range" min="1" max="50" value="5" id="geo-jitter-range">
+                      </div>
+                    </div>
+                    <div class="geo-info">
+                      <div class="geo-box">
+                        <div class="geo-label">GPS LAT</div>
+                        <div class="geo-coord" id="geo-lat">35.1796° N</div>
+                        <div class="geo-note" id="geo-jitter-note">Busan jitter 0.05</div>
+                      </div>
+                      <div class="geo-box">
+                        <div class="geo-label">GPS LNG</div>
+                        <div class="geo-coord" id="geo-lng">129.0756° E</div>
+                        <div class="geo-note" id="geo-city-note">Busan, KR</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ── Шаг 4: Запуск ── -->
+              <div class="step-block">
+                <div class="step-block-hdr">
+                  <span class="step-circle">4</span>
+                  <span class="step-block-title">Куда сохранить результат?</span>
+                </div>
+                <div class="dest-selector" id="dest-selector">
+                  <button class="dest-btn active" id="dest-download-btn" data-dest="download">
+                    <span class="dest-icon">⬇</span>
+                    <span class="dest-label">Скачать файл</span>
+                    <span class="dest-hint">Только рендер — скачаешь готовое</span>
+                  </button>
+                  <button class="dest-btn" id="dest-antidetect-btn" data-dest="antidetect">
+                    <span class="dest-icon">🛡</span>
+                    <span class="dest-label">В антидетект</span>
+                    <span class="dest-hint">Рендер + авто-залив на YouTube</span>
+                  </button>
+                </div>
+                <div class="input-grid" id="antidetect-row" style="margin-top:10px; display:none;">
+                  <div class="input-group">
+                    <label class="label-dark" for="profile-select">Профиль AdsPower</label>
+                    <select id="profile-select"></select>
+                  </div>
+                  <div class="input-group">
+                    <label class="label-dark" for="niche-input">Ниша для AI</label>
+                    <input class="input-dark" id="niche-input" value="YouTube Shorts Korea">
+                  </div>
+                </div>
+                <div class="copy-summary" id="copy-summary">
+                  Видео выбрано: <span style="color:#ff4757;font-weight:600;">0</span>. Рендер → скачать.
+                </div>
+                <div style="display:flex;gap:8px;margin-top:10px;">
+                  <button class="action-btn" id="preview-ai-btn">AI превью текста</button>
+                </div>
+                <div class="input-grid" style="margin-top:10px;">
+                  <div class="input-group">
+                    <label class="label-dark" for="variants-count-input">Пакет вариантов (1 исходник → N задач)</label>
+                    <input class="input-dark" id="variants-count-input" type="number" min="1" max="50" value="10">
+                  </div>
+                  <div class="input-group" style="align-self:end;">
+                    <button class="action-btn secondary" id="variants-generate-btn">Сделать N вариантов</button>
+                  </div>
+                </div>
+                <button class="bottom-btn" id="run-uniqualizer-btn" style="margin-top:12px;">Запустить рендер</button>
+              </div>
+            </div>
+
+            <!-- ══ ПРАВАЯ КОЛОНКА: предпросмотр ══ -->
+            <div class="uniq-right">
+              <div class="preview-card">
+                <div class="preview-card-title">Предпросмотр</div>
+
+                <!-- Миниатюра видео -->
+                <div class="thumb-wrap" id="thumb-wrap">
+                  <div class="thumb-empty" id="thumb-empty">
+                    <div style="font-size:32px;">🎬</div>
+                    <div style="font-size:12px;color:#555;margin-top:8px;">Выбери видео</div>
+                  </div>
+                  <img id="thumb-img" class="thumb-img" style="display:none;" alt="Предпросмотр">
+                  <div class="thumb-overlay" id="thumb-overlay" style="display:none;"></div>
+                </div>
+
+                <!-- Макет шаблона -->
+                <div class="tmpl-preview-label">Макет шаблона</div>
+                <div class="tmpl-preview-big" id="tmpl-preview-big">
+                  <div class="tpb-canvas tpb-default" id="tpb-canvas">
+                    <div class="tpb-vid" id="tpb-top"></div>
+                    <div class="tpb-bar" id="tpb-bar" style="display:none;"></div>
+                    <div class="tpb-bot" id="tpb-bot" style="display:none;"></div>
+                    <div class="tpb-sub" id="tpb-sub" style="display:none;"></div>
+                  </div>
+                </div>
+
+                <!-- Сводка настроек -->
+                <div class="summary-card" id="settings-summary">
+                  <div class="summary-row"><span class="summary-key">Пресет</span><span class="summary-val" id="sum-preset">Глубокий</span></div>
+                  <div class="summary-row"><span class="summary-key">Шаблон</span><span class="summary-val" id="sum-template">Стандарт</span></div>
+                  <div class="summary-row"><span class="summary-key">Оверлей</span><span class="summary-val" id="sum-overlay">Поверх · центр</span></div>
+                  <div class="summary-row"><span class="summary-key">Стиль текста</span><span class="summary-val" id="sum-sub-style">Обычный</span></div>
+                  <div class="summary-row"><span class="summary-key">Субтитры</span><span class="summary-val" id="sum-subtitle">—</span></div>
+                  <div class="summary-row"><span class="summary-key">Гео</span><span class="summary-val" id="sum-geo">Busan, KR</span></div>
+                  <div class="summary-row"><span class="summary-key">Видео</span><span class="summary-val" id="sum-files">0 файлов</span></div>
+                  <div class="summary-row"><span class="summary-key">Куда</span><span class="summary-val" id="sum-dest">Скачать</span></div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <section class="side-panel" data-panel="accounts">
+          <div class="two-col">
+            <div>
+              <div class="info-box">
+                <div class="info-label">AdsPower API</div>
+                <div class="input-grid" style="margin-top: 12px;">
+                  <div class="input-group">
+                    <label class="label-dark" for="adspower-api-input">Адрес API</label>
+                    <input class="input-dark mono" id="adspower-api-input" placeholder="http://127.0.0.1:50325">
+                  </div>
+                  <div class="input-group">
+                    <label class="label-dark" for="adspower-api-key-input">API Key</label>
+                    <input class="input-dark mono" id="adspower-api-key-input" placeholder="Bearer API key AdsPower">
+                  </div>
+                </div>
+                <div class="toggle">
+                  <span class="toggle-label">Проверка API (Authorization: Bearer)</span>
+                  <div class="toggle-switch off" id="adspower-auth-toggle"><div class="toggle-knob"></div></div>
+                </div>
+                <div class="section-actions">
+                  <button class="action-btn" id="save-ads-btn">Сохранить настройки</button>
+                  <button class="action-btn" id="verify-ads-btn">Проверить связь</button>
+                  <button class="action-btn" id="sync-ads-btn">Проверить и синхронизировать</button>
+                </div>
+              </div>
+
+              <div class="section-title">Профили AdsPower</div>
+              <div class="profile-list" id="profiles-list-box">
+                <div class="empty-state">Пока нет профилей. Нажмите «Проверить и синхронизировать».</div>
+              </div>
+            </div>
+
+            <div>
+              <div class="card-dark">
+                <div class="card-title">Статус связки</div>
+                <div id="ads-status-lines"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="side-panel" data-panel="uploads">
+          <div class="toolbar">
+            <button class="action-btn" id="start-pipeline-btn">Запустить очередь</button>
+            <button class="action-btn" id="enqueue-pending-btn">Добавить pending в очередь</button>
+            <button class="action-btn danger" id="stop-pipeline-btn">Остановить очередь</button>
+            <span class="queue-pill" id="queue-pill">Очередь: обновляем…</span>
+          </div>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Исходник</th>
+                  <th>Профиль</th>
+                  <th>Статус</th>
+                  <th>Рендер</th>
+                  <th>Ошибка</th>
+                  <th>Файл</th>
+                </tr>
+              </thead>
+              <tbody id="tasks-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="side-panel" data-panel="analytics">
+          <div class="stats-grid">
+            <div class="stat-card"><div class="stat-icon">🎬</div><div class="stat-value" id="analytics-total-videos">0</div><div class="stat-label">Всего видео</div></div>
+            <div class="stat-card"><div class="stat-icon">👁️</div><div class="stat-value" id="analytics-total-views">0</div><div class="stat-label">Просмотры</div></div>
+            <div class="stat-card"><div class="stat-icon">❤️</div><div class="stat-value" id="analytics-total-likes">0</div><div class="stat-label">Лайки</div></div>
+            <div class="stat-card"><div class="stat-icon">🌙</div><div class="stat-value" id="analytics-shadowban">0</div><div class="stat-label">Shadowban</div></div>
+            <div class="stat-card"><div class="stat-icon">🔴</div><div class="stat-value" id="analytics-banned">0</div><div class="stat-label">Бан</div></div>
+          </div>
+
+          <div class="toolbar">
+            <input class="input-dark" id="check-url-input" placeholder="https://www.youtube.com/watch?v=...">
+            <button class="action-btn" id="check-url-btn">Проверить ссылку</button>
+          </div>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Ссылка</th>
+                  <th>Просмотры</th>
+                  <th>Лайки</th>
+                  <th>Статус</th>
+                </tr>
+              </thead>
+              <tbody id="analytics-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="side-panel panel-hidden" data-panel="warmup">
+          <div class="section-title">Профили для прогрева</div>
+          <div class="profile-list" id="warmup-profiles-box">
+            <div class="empty-state">Сначала синхронизируйте профили из AdsPower.</div>
+          </div>
+
+          <div class="section-title">Цепочка действий</div>
+          <div class="checklist">
+            <div class="check-item"><span class="check-number">1</span><span class="check-icon video"></span><span>Смотреть 5 Shorts</span><span style="margin-left: auto; color: #666;">→</span></div>
+            <div class="check-item"><span class="check-number">2</span><span class="check-icon heart"></span><span>Лайкнуть 2-е видео</span><span style="margin-left: auto; color: #666;">→</span></div>
+            <div class="check-item"><span class="check-number">3</span><span class="check-icon bell"></span><span>Подписаться на канал</span><span style="margin-left: auto; color: #666;">→</span></div>
+            <div class="check-item"><span class="check-number">4</span><span class="check-icon clock"></span><span>Ждать 5 минут</span><span style="margin-left: auto; color: #666;">→</span></div>
+            <div class="check-item"><span class="check-number">5</span><span class="check-icon repeat"></span><span>Повторить × 3</span><span style="margin-left: auto; color: #666;">→</span></div>
+          </div>
+
+          <button class="start-btn" id="warmup-start-btn">Начать Прогрев</button>
+
+          <div style="margin-top: 32px; padding: 16px; background: rgba(255, 71, 87, 0.05); border: 1px solid rgba(255, 71, 87, 0.15); border-radius: 8px; color: #999; text-align: center; font-size: 12px;" id="warmup-queue-box">
+            Очередь прогрева пока в UI-подготовке. Профили и сценарии уже готовы к следующему этапу.
+          </div>
+        </section>
+
+        <section class="side-panel" data-panel="settings">
+          <div class="two-col">
+            <div>
+              <div class="info-box">
+                <div class="info-label">ИИ (Groq) — заголовки и текст на видео</div>
+                <div class="input-group" style="margin-top: 12px;">
+                  <label class="label-dark" for="groq-key-input">API ключ</label>
+                  <input class="input-dark mono" id="groq-key-input" placeholder="gsk_...">
+                </div>
+                <div class="input-group">
+                  <label class="label-dark" for="ai-niche-preview-input">Ниша для превью</label>
+                  <input class="input-dark" id="ai-niche-preview-input" value="Korean YouTube Shorts">
+                </div>
+                <div class="section-actions">
+                  <button class="action-btn" id="save-groq-btn">Сохранить ключ</button>
+                  <button class="action-btn" id="verify-groq-btn">Проверить ключ</button>
+                  <button class="action-btn" id="clear-groq-btn">Очистить ключ</button>
+                  <button class="action-btn" id="ai-preview-settings-btn">Сделать превью</button>
+                </div>
+                <div class="inline-note" style="margin-top:8px;">«Проверить» — запрос к Groq без списания токенов чата. Если поле ключа пустое, проверяется сохранённый ключ.</div>
+                <div class="inline-note" style="margin-top:6px;">После «Сохранить» ключи пишутся в <span class="mono" style="font-size:11px;">data/neo_settings.json</span> (файл в .gitignore). При старте сервера подхватываются <span class="mono" style="font-size:11px;">.env</span> и этот JSON — см. <span class="mono" style="font-size:11px;">.env.example</span>.</div>
+              </div>
+
+              <div class="info-box">
+                <div class="info-label">Tenant</div>
+                <div class="input-group" style="margin-top: 12px;">
+                  <label class="label-dark" for="tenant-input">Локальный tenant_id</label>
+                  <input class="input-dark mono" id="tenant-input" placeholder="default">
+                </div>
+                <div class="inline-note">После смены tenant интерфейс будет работать с отдельными данными и очередью.</div>
+                <div class="section-actions">
+                  <button class="action-btn" id="save-tenant-btn">Применить tenant</button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="card-dark">
+                <div class="card-title">Системный статус</div>
+                <div id="settings-status-lines"></div>
+              </div>
+              <div class="card-dark" style="margin-top: 16px;">
+                <div class="card-title">AI превью</div>
+                <div id="ai-preview-box" class="empty-state">Нажмите «Сделать превью», чтобы увидеть title / description / comment.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="render-progress-modal" class="render-progress-modal" aria-hidden="true" role="dialog" aria-labelledby="render-progress-title">
+    <div class="render-progress-modal__backdrop" id="render-progress-backdrop" title="Закрыть"></div>
+    <div class="render-progress-modal__card">
+      <button type="button" class="render-progress-modal__close" id="render-progress-close-btn" title="Закрыть" aria-label="Закрыть">✕</button>
+      <div class="render-progress-modal__title" id="render-progress-title">Идёт обработка</div>
+      <div class="render-progress-modal__percent" id="render-progress-percent">0%</div>
+      <div class="render-progress-modal__detail" id="render-progress-detail">Подождите…</div>
+      <div class="render-progress-modal__bar" id="render-progress-bar">
+        <div class="render-progress-modal__fill" id="render-progress-fill"></div>
+      </div>
+      <div class="render-progress-modal__hint">Автоматически по завершении. Можно закрыть вручную — обработка на сервере продолжится, если очередь запущена.</div>
+      <button type="button" class="action-btn secondary render-progress-modal__dismiss" id="render-progress-dismiss-btn">Закрыть окно</button>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
