@@ -2228,10 +2228,10 @@ export function UniqualizerPage() {
               <div><div className="progress-stat-label">Осталось</div><div className="progress-stat-value">{(() => { const eta = Number(progressQ.data?.eta_sec || 0); if (!eta || eta < 1) return "-"; const m = Math.floor(eta / 60); const s = Math.floor(eta % 60); return `${m}м ${s}с`; })()}</div></div>
               <div><div className="progress-stat-label">Очередь</div><div className="progress-stat-value">{Number(progressQ.data?.queue_done || 0)}/{Number(progressQ.data?.queue_total || 0)}</div></div>
             </div>
-            {progressQ.data?.hash && (
+            {Boolean(progressQ.data?.hash) && (
               <div style={{ marginTop: 10, padding: "6px 10px", background: "rgba(94,234,212,0.07)", border: "1px solid rgba(94,234,212,0.2)", borderRadius: 6, fontSize: 11, display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ color: "var(--text-tertiary)" }}>Hash:</span>
-                <span className="mono" style={{ color: "var(--accent-cyan)", letterSpacing: "0.04em" }}>{String(progressQ.data.hash)}</span>
+                <span className="mono" style={{ color: "var(--accent-cyan)", letterSpacing: "0.04em" }}>{String(progressQ.data?.hash ?? "")}</span>
               </div>
             )}
             <div className="progress-actions">

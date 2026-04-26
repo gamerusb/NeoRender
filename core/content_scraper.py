@@ -840,3 +840,97 @@ def get_queued_videos(uploads_dir: Path | None = None) -> list[dict[str, Any]]:
     return videos[:50]
 
 
+def enrich_video_risk(
+    video: dict[str, Any],
+    *,
+    query_patterns: list[str] | None = None,
+    watchlist_hit: bool = False,
+) -> dict[str, Any]:
+    """
+    Lightweight risk scoring for research results.
+    Returns original video dict enriched with normalized risk fields.
+    """
+    out = dict(video)
+    title = str(video.get("title") or "").lower()
+    desc = str(video.get("description") or "").lower()
+    channel = str(video.get("channel") or "").lower()
+    text = f"{title}\n{desc}\n{channel}"
+
+    signal_map: dict[str, int] = {}
+
+    def _add(signal: str, pts: int) -> None:
+        signal_map[signal] = signal_map.get(signal, 0) + pts
+
+    high_markers = (
+        "x100",
+        "x500",
+        "jackpot",
+        "big win",
+        "signal",
+        "predictor",
+        "promo code",
+        "промокод",
+        "бонус",
+        "бонус в профиле",
+        "схема заработка",
+        "легкие деньги",
+        "лёгкие деньги",
+        "забери бонус",
+        "ссылка в описании",
+        "link in bio",
+        "check profile",
+        "no deposit bonus",
+        "aviator",
+        "casino",
+        "slots",
+    )
+    medium_markers = ("cashout", "win", "strategy", "bonus", "gambling")
+
+    for k in high_markers:
+        if k in text:
+            _add(f"kw:{k}", 12)
+    for k in medium_markers:
+        if k in text:
+            _add(f"kw:{k}", 6)
+
+    if "review" in text or "обзор" in text or "explanation" in text:
+        _add("context:review", -12)
+    if "no links" in text or "без ссылки" in text:
+        _add("context:no_links", -10)
+
+    if watchlist_hit:
+        _add("watchlist_hit", 18)
+
+    qp = [str(x or "").strip().lower() for x in (query_patterns or []) if str(x or "").strip()]
+    if qp:
+        q_hits = 0
+        for q in qp:
+            toks = [t for t in q.split() if len(t) >= 4]
+            if any(t in text for t in toks):
+                q_hits += 1
+        if q_hits:
+            _add("query_match", min(15, q_hits * 4))
+
+    ubt_mask_score = min(100, sum(signal_map.values()))
+    risk_score = int(max(0, min(100, ubt_mask_score)))
+    if risk_score >= 65:
+        tier = "high"
+    elif risk_score >= 35:
+        tier = "medium"
+    else:
+        tier = "low"
+
+    confidence = 0.45 + min(0.5, (len(signal_map) * 0.08))
+    confidence = float(max(0.0, min(0.99, confidence)))
+    out["risk_score"] = risk_score
+    out["risk_tier"] = tier
+    out["risk_confidence"] = round(confidence, 3)
+    out["risk_signals"] = list(signal_map.keys())
+    out["risk_signal_map"] = signal_map
+    out["ubt_mask_score"] = ubt_mask_score
+    out["ubt_flags"] = [k for k in signal_map.keys() if signal_map.get(k, 0) >= 10]
+    out["ubt_marker"] = risk_score >= 65
+    out["ubt_suspected"] = risk_score >= 35
+    return out
+
+

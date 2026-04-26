@@ -5,7 +5,7 @@ import { apiFetch, apiUrl, type ApiJson } from "@/api";
 import { uiIconProps } from "@/components/icons/uiIconProps";
 import { useTenant } from "@/tenant/TenantContext";
 
-const R12 = uiIconProps(12);
+const R12 = uiIconProps(13);
 const R14 = uiIconProps(14);
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -491,7 +491,7 @@ export function ResearchPage() {
   const arbPanelGameKey = useMemo(() => {
     if (!arbScanResults) return null;
     const keys = ARB_GAMES.map((g) => g.key);
-    if (arbExpandedGame && keys.includes(arbExpandedGame)) return arbExpandedGame;
+    if (arbExpandedGame && keys.includes(arbExpandedGame as (typeof keys)[number])) return arbExpandedGame;
     return keys.find((k) => (arbScanResults[k]?.length ?? 0) > 0) ?? keys[0];
   }, [arbScanResults, arbExpandedGame]);
 

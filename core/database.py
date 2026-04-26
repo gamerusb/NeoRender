@@ -314,6 +314,25 @@ CREATE INDEX IF NOT EXISTS idx_campaign_runs_tenant ON campaign_runs(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_runs_status ON campaign_runs(tenant_id, status);
 """
 
+_AUTH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
+    email TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'banned')),
+    plan TEXT NOT NULL DEFAULT 'free' CHECK (plan IN ('free', 'starter', 'pro', 'enterprise')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(tenant_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(tenant_id, role);
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(tenant_id, status);
+"""
+
 
 async def _ensure_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute(
@@ -325,6 +344,7 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
         await db.executescript(_PROFILE_REGISTRY_SCHEMA)
         await db.executescript(_CAMPAIGNS_SCHEMA)
         await db.executescript(_CAMPAIGN_RUNS_SCHEMA)
+        await db.executescript(_AUTH_SCHEMA)
         await db.commit()
         return
     await _migrate_legacy_schema(db)
@@ -413,6 +433,7 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
     )
     await db.executescript(_CAMPAIGNS_SCHEMA)
     await db.executescript(_CAMPAIGN_RUNS_SCHEMA)
+    await db.executescript(_AUTH_SCHEMA)
     await db.commit()
 
 
@@ -2423,3 +2444,291 @@ async def list_campaign_runs(
     except Exception as exc:
         logger.exception("list_campaign_runs: %s", exc)
         return _error(str(exc))
+
+
+# --- Auth users ---------------------------------------------------------------
+
+_PLAN_LIMITS: dict[str, dict[str, int]] = {
+    "free": {"tasks_per_day": 10, "profiles": 3, "campaigns": 1, "storage_gb": 5},
+    "starter": {"tasks_per_day": 30, "profiles": 10, "campaigns": 5, "storage_gb": 20},
+    "pro": {"tasks_per_day": 100, "profiles": 20, "campaigns": 10, "storage_gb": 50},
+    "enterprise": {"tasks_per_day": 9999, "profiles": 999, "campaigns": 999, "storage_gb": 1000},
+}
+
+
+def _avatar_initials(name: str, email: str) -> str:
+    n = (name or "").strip()
+    if n:
+        parts = [p for p in n.split() if p]
+        if len(parts) >= 2:
+            return (parts[0][0] + parts[1][0]).upper()
+        return parts[0][:2].upper()
+    local = (email or "U").split("@", 1)[0]
+    return local[:2].upper() or "U"
+
+
+def _user_public(row: dict[str, Any]) -> dict[str, Any]:
+    plan = str(row.get("plan") or "free").lower()
+    limits = _PLAN_LIMITS.get(plan, _PLAN_LIMITS["free"])
+    return {
+        "id": int(row.get("id") or 0),
+        "tenant_id": str(row.get("tenant_id") or DEFAULT_TENANT_ID),
+        "email": str(row.get("email") or "").lower(),
+        "name": str(row.get("name") or ""),
+        "role": str(row.get("role") or "user"),
+        "status": str(row.get("status") or "active"),
+        "plan": plan,
+        "avatar_initials": _avatar_initials(str(row.get("name") or ""), str(row.get("email") or "")),
+        "created_at": str(row.get("created_at") or ""),
+        "plan_limits": dict(limits),
+        "usage": {
+            "tasks_today": 0,
+            "profiles_used": 0,
+            "campaigns_used": 0,
+            "storage_used_gb": 0,
+        },
+    }
+
+
+async def create_user(
+    email: str,
+    password_hash: str,
+    name: str = "",
+    role: str = "user",
+    plan: str = "free",
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    em = (email or "").strip().lower()
+    if not em:
+        return _error("Email обязателен")
+    role_v = "admin" if str(role).strip().lower() == "admin" else "user"
+    plan_v = str(plan or "free").strip().lower()
+    if plan_v not in _PLAN_LIMITS:
+        plan_v = "free"
+    try:
+        async with aiosqlite.connect(path) as db:
+            await db.execute(
+                """
+                INSERT INTO users (tenant_id, email, password_hash, name, role, status, plan)
+                VALUES (?, ?, ?, ?, ?, 'active', ?)
+                """,
+                (tid, em, password_hash, (name or "").strip(), role_v, plan_v),
+            )
+            await db.commit()
+            cur = await db.execute(
+                "SELECT * FROM users WHERE tenant_id = ? AND email = ?",
+                (tid, em),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return _error("Не удалось создать пользователя")
+            cols = [d[0] for d in cur.description]
+            user = dict(zip(cols, row))
+            return _ok({"user": _user_public(user)})
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "unique" in msg:
+            return _error("Пользователь с таким email уже зарегистрирован.")
+        logger.exception("create_user: %s", exc)
+        return _error("Не удалось создать пользователя.")
+
+
+async def get_user_by_email(
+    email: str,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    em = (email or "").strip().lower()
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM users WHERE tenant_id = ? AND lower(email) = lower(?)",
+                (tid, em),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return _error("Пользователь не найден")
+            return _ok({"user": dict(row)})
+    except Exception as exc:
+        logger.exception("get_user_by_email: %s", exc)
+        return _error("Не удалось получить пользователя.")
+
+
+async def get_user_by_id(
+    user_id: int,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM users WHERE tenant_id = ? AND id = ?",
+                (tid, int(user_id)),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return _error("Пользователь не найден")
+            public = _user_public(dict(row))
+            return _ok({"user": public})
+    except Exception as exc:
+        logger.exception("get_user_by_id: %s", exc)
+        return _error("Не удалось получить пользователя.")
+
+
+async def update_user(
+    user_id: int,
+    *,
+    name: str | None = None,
+    status: str | None = None,
+    role: str | None = None,
+    plan: str | None = None,
+    password_hash: str | None = None,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    updates: list[str] = []
+    vals: list[Any] = []
+    if name is not None:
+        updates.append("name = ?")
+        vals.append(name.strip())
+    if status is not None:
+        st = status.strip().lower()
+        if st not in ("active", "banned"):
+            return _error("Некорректный статус.")
+        updates.append("status = ?")
+        vals.append(st)
+    if role is not None:
+        rv = role.strip().lower()
+        if rv not in ("user", "admin"):
+            return _error("Некорректная роль.")
+        updates.append("role = ?")
+        vals.append(rv)
+    if plan is not None:
+        pv = plan.strip().lower()
+        if pv not in _PLAN_LIMITS:
+            return _error("Некорректный тариф.")
+        updates.append("plan = ?")
+        vals.append(pv)
+    if password_hash is not None:
+        updates.append("password_hash = ?")
+        vals.append(password_hash)
+    try:
+        async with aiosqlite.connect(path) as db:
+            if updates:
+                vals.extend([tid, int(user_id)])
+                await db.execute(
+                    f"UPDATE users SET {', '.join(updates)}, updated_at = datetime('now') WHERE tenant_id = ? AND id = ?",
+                    tuple(vals),
+                )
+                await db.commit()
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM users WHERE tenant_id = ? AND id = ?",
+                (tid, int(user_id)),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return _error("Пользователь не найден")
+            return _ok({"user": _user_public(dict(row))})
+    except Exception as exc:
+        logger.exception("update_user: %s", exc)
+        return _error("Не удалось обновить пользователя.")
+
+
+async def list_users(
+    tenant_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM users WHERE tenant_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
+                (tid, max(0, int(limit)), max(0, int(offset))),
+            )
+            rows = await cur.fetchall()
+            users = [_user_public(dict(r)) for r in rows]
+            return _ok({"users": users, "total": len(users)})
+    except Exception as exc:
+        logger.exception("list_users: %s", exc)
+        return _error("Не удалось получить список пользователей.")
+
+
+async def ensure_default_admin(
+    email: str,
+    password_hash: str,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    if not (password_hash or "").strip():
+        return _ok({"created": False})
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id FROM users WHERE tenant_id = ? AND role = 'admin' LIMIT 1",
+                (tid,),
+            )
+            if await cur.fetchone():
+                return _ok({"created": False})
+        created = await create_user(
+            email=email,
+            password_hash=password_hash,
+            name="Admin",
+            role="admin",
+            plan="enterprise",
+            tenant_id=tid,
+            db_path=path,
+        )
+        return _ok({"created": created.get("status") == "ok"})
+    except Exception as exc:
+        logger.exception("ensure_default_admin: %s", exc)
+        return _error("Не удалось создать администратора.")
+
+
+async def user_stats(
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            cur_total = await db.execute("SELECT COUNT(*) AS c FROM users WHERE tenant_id = ?", (tid,))
+            total_row = await cur_total.fetchone()
+            total_users = int(total_row["c"] if total_row else 0)
+
+            cur_plan = await db.execute(
+                "SELECT plan, COUNT(*) AS cnt FROM users WHERE tenant_id = ? GROUP BY plan",
+                (tid,),
+            )
+            by_plan = {str(r["plan"]): int(r["cnt"]) for r in await cur_plan.fetchall()}
+
+            cur_status = await db.execute(
+                "SELECT status, COUNT(*) AS cnt FROM users WHERE tenant_id = ? GROUP BY status",
+                (tid,),
+            )
+            by_status = {str(r["status"]): int(r["cnt"]) for r in await cur_status.fetchall()}
+
+            return _ok({"total_users": total_users, "by_plan": by_plan, "by_status": by_status})
+    except Exception as exc:
+        logger.exception("user_stats: %s", exc)
+        return _error("Не удалось получить статистику пользователей.")

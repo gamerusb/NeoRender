@@ -6,6 +6,7 @@ import { useEffect, useState, useCallback } from "react";
 import {
   AlertTriangle,
   AreaChart,
+  BadgeCheck,
   Bell,
   CalendarDays,
   Captions,
@@ -22,6 +23,7 @@ import {
   LineChart,
   ListOrdered,
   Megaphone,
+  ReceiptText,
   RefreshCw,
   Search,
   Settings,
@@ -55,6 +57,12 @@ const pageTitles: Record<string, string> = {
   "/profile-jobs": "Profile Jobs",
   "/pricing": "Тарифы",
   "/settings": "Настройки",
+  "/cabinet/profile": "Профиль",
+  "/cabinet/usage": "Использование",
+  "/cabinet/billing": "Биллинг",
+  "/admin/users": "Пользователи",
+  "/admin/stats": "Статистика",
+  "/admin/system": "Система",
 };
 
 type NavSection = {
@@ -110,6 +118,22 @@ function useNavSections(tenantId: string): NavSection[] {
         { to: "/accounts", label: "Аккаунты", icon: <Users {...NAV} aria-hidden /> },
         { to: "/pricing", label: "Тарифы", icon: <Tags {...NAV} aria-hidden /> },
         { to: "/settings", label: "Настройки", icon: <Settings {...NAV} aria-hidden /> },
+      ],
+    },
+    {
+      title: "Кабинет",
+      items: [
+        { to: "/cabinet/profile", label: "Профиль", icon: <Users {...NAV} aria-hidden /> },
+        { to: "/cabinet/usage", label: "Использование", icon: <BadgeCheck {...NAV} aria-hidden /> },
+        { to: "/cabinet/billing", label: "Биллинг", icon: <ReceiptText {...NAV} aria-hidden /> },
+      ],
+    },
+    {
+      title: "Админ",
+      items: [
+        { to: "/admin/users", label: "Пользователи", icon: <Users {...NAV} aria-hidden /> },
+        { to: "/admin/stats", label: "Статистика", icon: <LineChart {...NAV} aria-hidden /> },
+        { to: "/admin/system", label: "Система", icon: <Settings {...NAV} aria-hidden /> },
       ],
     },
   ];

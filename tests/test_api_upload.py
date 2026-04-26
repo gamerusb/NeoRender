@@ -120,3 +120,45 @@ def test_upload_srt_via_purpose(client: TestClient):
     assert data.get("status") == "ok"
     assert str(data.get("path", "")).lower().endswith(".srt")
     assert data.get("subtitle_srt_path")
+
+
+def test_upload_srt_wrong_extension_rejected(client: TestClient):
+    files = {"file": ("subs.txt", BytesIO(b"1\n00:00:00,000 --> 00:00:01,000\nhi\n"), "text/plain")}
+    r = client.post(
+        "/api/upload",
+        files=files,
+        data={"purpose": "srt"},
+        headers={"X-Tenant-ID": "default"},
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["status"] == "error"
+    assert ".srt" in body["message"]
+
+
+def test_upload_returns_429_when_rate_limited(client: TestClient, monkeypatch):
+    import api_server
+
+    monkeypatch.setattr(api_server, "_is_rate_limited", lambda *_a, **_k: True)
+    files = {"file": ("tiny.mp4", BytesIO(b"\x00\x00\x00\x18ftypmp42"), "video/mp4")}
+    r = client.post("/api/upload", files=files, headers={"X-Tenant-ID": "default"})
+    assert r.status_code == 429
+    assert r.json()["status"] == "error"
+
+
+def test_upload_returns_413_when_stream_too_large(client: TestClient, monkeypatch):
+    import api_server
+    import core.storage as storage_mod
+
+    class _BoomStorage:
+        async def save_upload_stream(self, tenant_id, filename_hint, chunks):
+            # Убеждаемся, что endpoint действительно передал async-чанки.
+            assert tenant_id == "default"
+            assert filename_hint.endswith(".mp4")
+            raise ValueError("too big")
+
+    monkeypatch.setattr(storage_mod, "get_default_storage", lambda: _BoomStorage())
+    files = {"file": ("big.mp4", BytesIO(b"x" * 32), "video/mp4")}
+    r = client.post("/api/upload", files=files, headers={"X-Tenant-ID": "default"})
+    assert r.status_code == 413
+    assert r.json()["status"] == "error"

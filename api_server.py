@@ -45,6 +45,7 @@ from core import profile_job_runner
 from core import storage as storage_mod
 from core import content_scraper
 from core import subtitle_generator
+from core import auth as auth_core
 from core.main_loop import AutomationPipeline
 from core.tenancy import normalize_tenant_id, tenant_id_from_environ
 
@@ -57,6 +58,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 _UPLOADS_ROOT = ROOT / "data" / "uploads"
 _ARBITRAGE_ALERT_STATE_FILE = ROOT / "data" / "arbitrage_alert_state.json"
+_RISK_LABELS_FILE = ROOT / "data" / "risk_labels.json"
 
 # Кэш результата `ffmpeg -version` — обновляется раз в 60 секунд.
 _ffmpeg_version_cache: dict[str, Any] = {}
@@ -82,6 +84,10 @@ async def _lifespan(_app: FastAPI):
             logger.warning("init_db: %s", r)
     except Exception as exc:
         logger.exception("startup db: %s", exc)
+    try:
+        await _ensure_demo_auth_users()
+    except Exception as exc:
+        logger.warning("startup demo users: %s", exc)
     # Инициализация реестра антидетект-браузеров
     try:
         from core.antidetect_registry import init_registry
@@ -140,6 +146,184 @@ async def get_tenant_id(
 TenantDep = Annotated[str, Depends(get_tenant_id)]
 
 
+def _auth_user_or_401(user: dict[str, Any] | None) -> JSONResponse | None:
+    if not user:
+        return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=401)
+    return None
+
+
+class AuthRegisterBody(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
+
+class AuthLoginBody(BaseModel):
+    email: str
+    password: str
+
+
+class AuthUpdateBody(BaseModel):
+    name: str = ""
+
+
+class AuthChangePasswordBody(BaseModel):
+    old_password: str
+    new_password: str
+
+
+class AdminPlanBody(BaseModel):
+    plan: str
+
+
+@app.get("/api/auth/ping")
+async def auth_ping():
+    return _json_ok({"auth": "real"})
+
+
+@app.post("/api/auth/register")
+async def auth_register(body: AuthRegisterBody, tenant_id: TenantDep):
+    email = (body.email or "").strip().lower()
+    pwd = str(body.password or "")
+    if not email:
+        return JSONResponse({"status": "error", "message": "Email обязателен."}, status_code=400)
+    if len(pwd) < 6:
+        return JSONResponse({"status": "error", "message": "Слишком короткий пароль."}, status_code=400)
+    created = await dbmod.create_user(
+        email=email,
+        password_hash=auth_core.hash_password(pwd),
+        name=(body.name or "").strip(),
+        role="user",
+        plan="free",
+        tenant_id=tenant_id,
+    )
+    if created.get("status") != "ok":
+        return JSONResponse(created, status_code=400)
+    user = created.get("user") or {}
+    token = auth_core.create_access_token(int(user.get("id") or 0), email, "user", tenant_id)
+    return _json_ok({"token": token, "user": user})
+
+
+@app.post("/api/auth/login")
+async def auth_login(body: AuthLoginBody, tenant_id: TenantDep):
+    email = (body.email or "").strip().lower()
+    pwd = str(body.password or "")
+    row = await dbmod.get_user_by_email(email, tenant_id=tenant_id)
+    if row.get("status") != "ok":
+        return JSONResponse({"status": "error", "message": "Неверный email или пароль."}, status_code=401)
+    user = row.get("user") or {}
+    if not auth_core.verify_password(pwd, str(user.get("password_hash") or "")):
+        return JSONResponse({"status": "error", "message": "Неверный email или пароль."}, status_code=401)
+    if str(user.get("status") or "active") == "banned":
+        return JSONResponse({"status": "error", "message": "Пользователь заблокирован."}, status_code=403)
+    token = auth_core.create_access_token(int(user.get("id") or 0), email, str(user.get("role") or "user"), tenant_id)
+    safe = await dbmod.get_user_by_id(int(user.get("id") or 0), tenant_id=tenant_id)
+    return _json_ok({"token": token, "user": safe.get("user")})
+
+
+@app.get("/api/auth/me")
+async def auth_me(tenant_id: TenantDep, current: auth_core.CurrentUser):
+    safe = await dbmod.get_user_by_id(current.user_id, tenant_id=tenant_id)
+    if safe.get("status") != "ok":
+        return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=401)
+    return _json_ok({"user": safe.get("user")})
+
+
+@app.patch("/api/auth/me")
+async def auth_update_me(body: AuthUpdateBody, tenant_id: TenantDep, current: auth_core.CurrentUser):
+    upd = await dbmod.update_user(current.user_id, name=(body.name or "").strip(), tenant_id=tenant_id)
+    if upd.get("status") != "ok":
+        return JSONResponse(upd, status_code=400)
+    return _json_ok({"user": upd.get("user")})
+
+
+@app.post("/api/auth/change-password")
+async def auth_change_password(
+    body: AuthChangePasswordBody,
+    tenant_id: TenantDep,
+    current: auth_core.CurrentUser,
+):
+    user_res = await dbmod.get_user_by_email(current.email, tenant_id=tenant_id)
+    if user_res.get("status") != "ok":
+        return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=401)
+    user = user_res.get("user") or {}
+    if not auth_core.verify_password(str(body.old_password or ""), str(user.get("password_hash") or "")):
+        return JSONResponse({"status": "error", "message": "Старый пароль неверен."}, status_code=400)
+    if len(str(body.new_password or "")) < 6:
+        return JSONResponse({"status": "error", "message": "Новый пароль слишком короткий."}, status_code=400)
+    upd = await dbmod.update_user(
+        current.user_id,
+        password_hash=auth_core.hash_password(str(body.new_password)),
+        tenant_id=tenant_id,
+    )
+    if upd.get("status") != "ok":
+        return JSONResponse(upd, status_code=400)
+    return _json_ok({"changed": True})
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    return _json_ok({"logged_out": True})
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(tenant_id: TenantDep, _admin: auth_core.AdminUser):
+    out = await dbmod.list_users(tenant_id=tenant_id, limit=1000, offset=0)
+    if out.get("status") != "ok":
+        return JSONResponse(out, status_code=400)
+    users = out.get("users") or []
+    return _json_ok({"users": users, "total": len(users)})
+
+
+@app.post("/api/admin/users/{user_id}/ban")
+async def admin_ban_user(user_id: int, tenant_id: TenantDep, admin: auth_core.AdminUser):
+    if int(user_id) == int(admin.user_id):
+        return JSONResponse({"status": "error", "message": "Нельзя заблокировать самого себя."}, status_code=400)
+    check = await dbmod.get_user_by_id(user_id, tenant_id=tenant_id)
+    if check.get("status") != "ok":
+        return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=404)
+    upd = await dbmod.update_user(user_id, status="banned", tenant_id=tenant_id)
+    if upd.get("status") != "ok":
+        return JSONResponse(upd, status_code=400)
+    return _json_ok({"user": upd.get("user")})
+
+
+@app.post("/api/admin/users/{user_id}/unban")
+async def admin_unban_user(user_id: int, tenant_id: TenantDep, _admin: auth_core.AdminUser):
+    check = await dbmod.get_user_by_id(user_id, tenant_id=tenant_id)
+    if check.get("status") != "ok":
+        return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=404)
+    upd = await dbmod.update_user(user_id, status="active", tenant_id=tenant_id)
+    if upd.get("status") != "ok":
+        return JSONResponse(upd, status_code=400)
+    return _json_ok({"user": upd.get("user")})
+
+
+@app.post("/api/admin/users/{user_id}/plan")
+async def admin_change_plan(user_id: int, body: AdminPlanBody, tenant_id: TenantDep, _admin: auth_core.AdminUser):
+    check = await dbmod.get_user_by_id(user_id, tenant_id=tenant_id)
+    if check.get("status") != "ok":
+        return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=404)
+    upd = await dbmod.update_user(user_id, plan=str(body.plan or "").lower(), tenant_id=tenant_id)
+    if upd.get("status") != "ok":
+        return JSONResponse(upd, status_code=400)
+    return _json_ok({"user": upd.get("user")})
+
+
+@app.get("/api/admin/stats")
+async def admin_stats(tenant_id: TenantDep, _admin: auth_core.AdminUser):
+    st = await dbmod.user_stats(tenant_id=tenant_id)
+    if st.get("status") != "ok":
+        return JSONResponse(st, status_code=400)
+    return _json_ok(
+        {
+            "total_users": st.get("total_users", 0),
+            "by_plan": st.get("by_plan", {}),
+            "by_status": st.get("by_status", {}),
+        }
+    )
+
+
 def _load_arbitrage_monitor_cfg() -> dict[str, Any]:
     """Read optional arbitrage monitor settings from neo_settings.json."""
     try:
@@ -178,6 +362,24 @@ def _save_arbitrage_alert_state(state: dict[str, Any]) -> None:
         )
     except Exception as exc:
         logger.warning("save_arbitrage_alert_state: %s", exc)
+
+
+def _load_risk_labels() -> list[dict[str, Any]]:
+    try:
+        if not _RISK_LABELS_FILE.is_file():
+            return []
+        raw = json.loads(_RISK_LABELS_FILE.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, list) else []
+    except Exception:
+        return []
+
+
+def _save_risk_labels(rows: list[dict[str, Any]]) -> None:
+    try:
+        _RISK_LABELS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _RISK_LABELS_FILE.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("save_risk_labels: %s", exc)
 
 
 async def _send_arbitrage_alerts(
@@ -238,6 +440,43 @@ async def _send_arbitrage_alerts(
     keep = list(sent_ids)[-4000:]
     _save_arbitrage_alert_state({"sent_ids": keep})
     return len(selected)
+
+
+async def _ensure_demo_auth_users() -> None:
+    """
+    Локальные demo-аккаунты для страницы логина (не трогаем существующие записи).
+    """
+    try:
+        demo_users = [
+            {
+                "email": "admin@neorender.pro",
+                "password": "admin123",
+                "name": "Admin",
+                "role": "admin",
+                "plan": "enterprise",
+            },
+            {
+                "email": "user@neorender.pro",
+                "password": "user123",
+                "name": "Demo User",
+                "role": "user",
+                "plan": "pro",
+            },
+        ]
+        for du in demo_users:
+            existing = await dbmod.get_user_by_email(du["email"], tenant_id="default")
+            if existing.get("status") == "ok":
+                continue
+            await dbmod.create_user(
+                email=du["email"],
+                password_hash=auth_core.hash_password(du["password"]),
+                name=du["name"],
+                role=du["role"],
+                plan=du["plan"],
+                tenant_id="default",
+            )
+    except Exception as exc:
+        logger.warning("ensure_demo_auth_users: %s", exc)
 
 
 def _tenant_for_media_stream(
@@ -3306,6 +3545,70 @@ async def research_advice(tenant_id: TenantDep, body: dict):
     except Exception as exc:
         logger.exception("research_advice: %s", exc)
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/research/risk-label")
+async def research_risk_label(tenant_id: TenantDep, body: dict):
+    try:
+        video_id = str(body.get("video_id") or "").strip()
+        url = str(body.get("url") or "").strip()
+        source = str(body.get("source") or "youtube").strip()
+        label = str(body.get("label") or "").strip()
+        score = int(body.get("risk_score") or 0)
+        if not video_id and not url:
+            return JSONResponse({"status": "error", "message": "video_id или url обязательны."}, status_code=400)
+        rows = _load_risk_labels()
+        rows.append(
+            {
+                "tenant_id": normalize_tenant_id(tenant_id),
+                "video_id": video_id,
+                "url": url,
+                "source": source,
+                "label": label,
+                "risk_score": score,
+                "created_at": dt.datetime.utcnow().isoformat() + "Z",
+            }
+        )
+        _save_risk_labels(rows[-5000:])
+        return _json_ok({"saved": True})
+    except Exception as exc:
+        logger.exception("research_risk_label: %s", exc)
+        return JSONResponse({"status": "error", "message": "Не удалось сохранить метку риска."}, status_code=500)
+
+
+@app.get("/api/research/risk-telemetry")
+async def research_risk_telemetry(tenant_id: TenantDep):
+    try:
+        tid = normalize_tenant_id(tenant_id)
+        rows = [r for r in _load_risk_labels() if str(r.get("tenant_id") or "default") == tid]
+        tier_counts = {"low": 0, "medium": 0, "high": 0}
+        label_counts: dict[str, int] = {}
+        signal_counts: dict[str, int] = {}
+
+        for r in rows:
+            score = int(r.get("risk_score") or 0)
+            tier = "high" if score >= 65 else ("medium" if score >= 35 else "low")
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+            label = str(r.get("label") or "").strip()
+            if label:
+                label_counts[label] = label_counts.get(label, 0) + 1
+                signal_counts[label] = signal_counts.get(label, 0) + 1
+
+        top_signals = [
+            {"signal": k, "count": v}
+            for k, v in sorted(signal_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        ]
+        return _json_ok(
+            {
+                "tier_counts": tier_counts,
+                "top_signals": top_signals,
+                "label_counts": label_counts,
+                "total": len(rows),
+            }
+        )
+    except Exception as exc:
+        logger.exception("research_risk_telemetry: %s", exc)
+        return JSONResponse({"status": "error", "message": "Не удалось получить телеметрию риска."}, status_code=500)
 
 
 # ──────────────────────────── Campaigns ───────────────────────────────────────
