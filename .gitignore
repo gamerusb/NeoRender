@@ -17,3 +17,17 @@ venv/
 # Frontend build
 web/dist/
 frontend/node_modules/
+
+# Runtime/generated data
+data/neorender.db
+data/rendered/
+data/uploads/
+data/subtitles/test_burn/
+data/subtitles/default/*.ass
+data/subtitles/default/*.srt
+data/subtitles/**/*_subtitled.mp4
+data/risk_labels.json
+
+# Local agent artifacts
+.claude/projects/
+server.err
