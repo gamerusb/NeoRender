@@ -19,7 +19,14 @@
       "Bash(curl -s http://127.0.0.1:8766/api/subtitles/2d277870-ec1c-4e6c-978b-0b7eb8c9863c -H 'X-Tenant-ID: wrong-tenant')",
       "Bash(curl -s http://127.0.0.1:8766/ui/)",
       "Bash(curl:*)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(netstat -ano)",
+      "Bash(findstr \":8765 \")",
+      "Bash(py -3.13 run_server.py)",
+      "Bash(cmd:*)",
+      "Bash(ping -n 2 127.0.0.1)",
+      "WebSearch",
+      "Bash(py:*)"
     ]
   }
 }
