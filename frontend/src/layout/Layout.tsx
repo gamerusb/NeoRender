@@ -2,12 +2,14 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useTenant } from "@/tenant/TenantContext";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, type ApiJson } from "@/api";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { useAuth } from "@/auth/AuthContext";
 import {
   AlertTriangle,
   AreaChart,
   BadgeCheck,
   Bell,
+  Briefcase,
   CalendarDays,
   Captions,
   ChevronsLeft,
@@ -21,13 +23,16 @@ import {
   Info,
   LayoutDashboard,
   LineChart,
+  Link2,
   ListOrdered,
+  LogOut,
   Megaphone,
   ReceiptText,
   RefreshCw,
   Search,
   Settings,
   Tags,
+  User2,
   Users,
   X,
   XCircle,
@@ -116,6 +121,8 @@ function useNavSections(tenantId: string): NavSection[] {
         { to: "/proxy", label: "Прокси", icon: <Globe2 {...NAV} aria-hidden /> },
         { to: "/warmup", label: "Прогрев", icon: <Flame {...NAV} aria-hidden /> },
         { to: "/accounts", label: "Аккаунты", icon: <Users {...NAV} aria-hidden /> },
+        { to: "/profile-links", label: "Profile Links", icon: <Link2 {...NAV} aria-hidden /> },
+        { to: "/profile-jobs", label: "Profile Jobs", icon: <Briefcase {...NAV} aria-hidden /> },
         { to: "/pricing", label: "Тарифы", icon: <Tags {...NAV} aria-hidden /> },
         { to: "/settings", label: "Настройки", icon: <Settings {...NAV} aria-hidden /> },
       ],
@@ -123,7 +130,7 @@ function useNavSections(tenantId: string): NavSection[] {
     {
       title: "Кабинет",
       items: [
-        { to: "/cabinet/profile", label: "Профиль", icon: <Users {...NAV} aria-hidden /> },
+        { to: "/cabinet/profile", label: "Профиль", icon: <User2 {...NAV} aria-hidden /> },
         { to: "/cabinet/usage", label: "Использование", icon: <BadgeCheck {...NAV} aria-hidden /> },
         { to: "/cabinet/billing", label: "Биллинг", icon: <ReceiptText {...NAV} aria-hidden /> },
       ],
@@ -148,8 +155,16 @@ const _pkgVersion = pkg.version ?? "0.3";
 
 export function Layout() {
   const { tenantId, setTenantId } = useTenant();
+  const { user, logout } = useAuth();
   const qc = useQueryClient();
-  const navSections = useNavSections(tenantId);
+  const allNavSections = useNavSections(tenantId);
+
+  // Role-based nav: hide Admin section for non-admins
+  const navSections = allNavSections.filter((section) => {
+    if (section.title === "Админ") return user?.role === "admin";
+    return true;
+  });
+
   const [tenantDraft, setTenantDraft] = useState(tenantId);
   const [tenantMode, setTenantMode] = useState<"default" | "custom">(
     tenantId === "default" ? "default" : "custom"
@@ -157,6 +172,9 @@ export function Layout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [toasts, setToasts] = useState<{ id: number; type: string; msg: string }[]>([]);
+  const [showAvatarMenu, setShowAvatarMenu] = useState(false);
+  const [kbdHintSeen, setKbdHintSeen] = useState(() => localStorage.getItem("neo_kbd_hint") === "1");
+  const avatarRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -169,6 +187,18 @@ export function Layout() {
     setTenantDraft(tenantId);
     setTenantMode(tenantId === "default" ? "default" : "custom");
   }, [tenantId]);
+
+  // Close avatar dropdown on outside click
+  useEffect(() => {
+    if (!showAvatarMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (avatarRef.current && !avatarRef.current.contains(e.target as Node)) {
+        setShowAvatarMenu(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [showAvatarMenu]);
 
   const addToast = useCallback((type: string, msg: string) => {
     const id = Date.now();
@@ -186,8 +216,15 @@ export function Layout() {
       if ((e.ctrlKey || e.metaKey) && e.key === "k") {
         e.preventDefault();
         setCmdkOpen((v) => !v);
+        if (!kbdHintSeen) {
+          setKbdHintSeen(true);
+          localStorage.setItem("neo_kbd_hint", "1");
+        }
       }
-      if (e.key === "Escape") setCmdkOpen(false);
+      if (e.key === "Escape") {
+        setCmdkOpen(false);
+        setShowAvatarMenu(false);
+      }
       if (e.ctrlKey && e.key === "[") {
         e.preventDefault();
         setSidebarCollapsed((c) => !c);
@@ -195,7 +232,7 @@ export function Layout() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [kbdHintSeen]);
 
   const TICO = uiIconProps(16);
   const toastIcons: Record<string, JSX.Element> = {
@@ -204,6 +241,8 @@ export function Layout() {
     warning: <AlertTriangle {...TICO} color="var(--accent-amber)" aria-hidden />,
     info: <Info {...TICO} color="var(--accent-cyan)" aria-hidden />,
   };
+
+  const avatarInitials = user?.avatar_initials ?? tenantId.slice(0, 2).toUpperCase();
 
   return (
     <div className={`container${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
@@ -228,10 +267,12 @@ export function Layout() {
       {/* Command Palette */}
       <CommandPalette open={cmdkOpen} onClose={() => setCmdkOpen(false)} onToast={addToast} />
 
-      {/* Keyboard hint */}
-      <div className="kbd-hint">
-        <kbd>Ctrl</kbd><kbd>K</kbd> поиск
-      </div>
+      {/* Keyboard hint — bottom-left, fades away after first Ctrl+K use */}
+      {!kbdHintSeen && (
+        <div className="kbd-hint">
+          <kbd>Ctrl</kbd><kbd>K</kbd> поиск · <kbd>Ctrl</kbd><kbd>[</kbd> меню
+        </div>
+      )}
 
       {/* Sidebar */}
       <aside className="sidebar">
@@ -243,19 +284,6 @@ export function Layout() {
           </div>
         </div>
 
-        <button
-          type="button"
-          className="sidebar-collapse-btn"
-          onClick={() => setSidebarCollapsed((c) => !c)}
-          title={sidebarCollapsed ? "Развернуть" : "Свернуть"}
-        >
-          {sidebarCollapsed ? (
-            <ChevronsRight {...uiIconProps(16)} aria-hidden />
-          ) : (
-            <ChevronsLeft {...uiIconProps(16)} aria-hidden />
-          )}
-        </button>
-
         <nav className="sidebar-nav" style={{ display: "flex", flexDirection: "column" }}>
           {navSections.map((section) => (
             <div key={section.title}>
@@ -264,6 +292,7 @@ export function Layout() {
                 <NavLink
                   key={item.to}
                   to={item.to}
+                  title={item.label}
                   className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
                 >
                   <span className="nav-icon" style={{ width: 18, height: 18 }}>
@@ -332,6 +361,23 @@ export function Layout() {
             </div>
           )}
         </div>
+
+        {/* Collapse button — at the bottom of sidebar */}
+        <div className="sidebar-footer-actions">
+          <button
+            type="button"
+            className="sidebar-collapse-btn"
+            onClick={() => setSidebarCollapsed((c) => !c)}
+            title={sidebarCollapsed ? "Развернуть (Ctrl+[)" : "Свернуть (Ctrl+[)"}
+            style={{ margin: 0 }}
+          >
+            {sidebarCollapsed ? (
+              <ChevronsRight {...uiIconProps(16)} aria-hidden />
+            ) : (
+              <ChevronsLeft {...uiIconProps(16)} aria-hidden />
+            )}
+          </button>
+        </div>
       </aside>
 
       {/* Main */}
@@ -339,7 +385,9 @@ export function Layout() {
         <header className="topbar">
           {/* Breadcrumbs */}
           <div className="breadcrumbs">
-            <span className="breadcrumb-item" onClick={() => navigate("/dashboard")}>NeoRender</span>
+            <button type="button" className="breadcrumb-item" onClick={() => navigate("/dashboard")}>
+              NeoRender
+            </button>
             <span className="breadcrumb-sep">/</span>
             <span className="breadcrumb-current">{pageTitle}</span>
           </div>
@@ -350,25 +398,85 @@ export function Layout() {
           <div className="topbar-search" onClick={() => setCmdkOpen(true)}>
             <Search {...uiIconProps(15)} className="topbar-search-ico" aria-hidden />
             Найти что угодно...
-            <span className="topbar-search-key">⌘K</span>
+            <span className="topbar-search-key">Ctrl+K</span>
           </div>
 
           {/* Actions */}
           <div className="topbar-actions">
-            <button type="button" className="topbar-btn" title="Обновить" onClick={() => void refresh()}>
+            <button type="button" className="topbar-btn" title="Обновить данные" onClick={() => void refresh()}>
               <RefreshCw {...uiIconProps(15)} aria-hidden />
             </button>
             <button
               type="button"
               className="topbar-btn"
               title="Уведомления"
-              style={{ position: "relative" }}
-              onClick={() => addToast("info", "3 новых уведомления")}
+              onClick={() => addToast("info", "Система уведомлений в разработке")}
             >
               <Bell {...uiIconProps(15)} aria-hidden />
-              <div className="notif-dot" />
             </button>
-            <div className="topbar-avatar">{tenantId.slice(0, 1).toUpperCase()}</div>
+
+            {/* Avatar with dropdown */}
+            <div ref={avatarRef} className="avatar-wrap">
+              <button
+                type="button"
+                className="topbar-avatar"
+                onClick={() => setShowAvatarMenu((v) => !v)}
+                aria-label="Меню пользователя"
+                aria-expanded={showAvatarMenu}
+              >
+                {avatarInitials}
+              </button>
+              {showAvatarMenu && (
+                <div className="avatar-menu" role="menu">
+                  <div className="avatar-menu-header">
+                    <div className="avatar-menu-name">{user?.name ?? tenantId}</div>
+                    {user?.email && <div className="avatar-menu-email">{user.email}</div>}
+                    {user?.role === "admin" && (
+                      <span className="badge badge-purple" style={{ marginTop: 6 }}>admin</span>
+                    )}
+                    {user?.plan && user.plan !== "free" && (
+                      <span className="badge badge-info" style={{ marginTop: 6, marginLeft: user?.role === "admin" ? 4 : 0 }}>{user.plan}</span>
+                    )}
+                  </div>
+                  <div className="avatar-menu-items">
+                    <NavLink
+                      to="/cabinet/profile"
+                      className="avatar-menu-item"
+                      onClick={() => setShowAvatarMenu(false)}
+                    >
+                      <User2 size={14} aria-hidden /> Профиль
+                    </NavLink>
+                    <NavLink
+                      to="/cabinet/usage"
+                      className="avatar-menu-item"
+                      onClick={() => setShowAvatarMenu(false)}
+                    >
+                      <BadgeCheck size={14} aria-hidden /> Использование
+                    </NavLink>
+                    <NavLink
+                      to="/cabinet/billing"
+                      className="avatar-menu-item"
+                      onClick={() => setShowAvatarMenu(false)}
+                    >
+                      <ReceiptText size={14} aria-hidden /> Биллинг
+                    </NavLink>
+                  </div>
+                  <div className="avatar-menu-footer">
+                    <button
+                      type="button"
+                      className="avatar-menu-logout"
+                      onClick={() => {
+                        logout();
+                        setShowAvatarMenu(false);
+                        navigate("/login");
+                      }}
+                    >
+                      <LogOut size={14} aria-hidden /> Выйти
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 

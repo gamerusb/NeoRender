@@ -19,14 +19,14 @@ type AnalyticsRow = {
 };
 
 const DEMO_VIEWS_30 = [
-  420, 510, 480, 620, 710, 690, 760, 840, 920, 870,
-  980, 1100, 1020, 1180, 1260, 1210, 1350, 1420, 1510, 1470,
-  1620, 1710, 1680, 1820, 1900, 2010, 2140, 2230, 2310, 2450,
+  52_400, 61_800, 58_200, 74_500, 88_100, 83_700, 97_300, 112_400, 128_600, 119_800,
+  138_200, 157_500, 144_900, 172_300, 191_700, 183_400, 208_600, 224_100, 241_800, 233_500,
+  261_400, 278_900, 268_300, 294_700, 312_500, 331_200, 358_700, 374_100, 389_600, 418_200,
 ];
 const DEMO_UPLOADS_30 = [
-  2, 3, 2, 3, 4, 3, 4, 5, 5, 4,
-  5, 6, 5, 6, 7, 6, 7, 7, 8, 7,
-  8, 9, 8, 9, 10, 9, 10, 11, 10, 12,
+  18, 22, 19, 25, 31, 28, 34, 38, 42, 37,
+  44, 51, 46, 55, 60, 57, 64, 68, 73, 69,
+  76, 82, 78, 87, 93, 89, 98, 104, 99, 112,
 ];
 
 function compact(n: number): string {
@@ -71,27 +71,41 @@ function makeDemoSeries(range: "24h" | "7d" | "30d" | "90d"): { labels: string[]
   const labels: string[] = [];
   const views: number[] = [];
   const uploads: number[] = [];
-  const base = range === "24h" ? 2200 : range === "7d" ? 4200 : range === "30d" ? 5600 : 6800;
-  const amp = range === "24h" ? 700 : range === "7d" ? 1300 : range === "30d" ? 1800 : 2200;
+
+  // Realistic view base per period (12 active shorts channels)
+  const baseV  = range === "24h" ?  14_800 : range === "7d" ? 186_000 : range === "30d" ? 224_000 : 168_000;
+  const ampV   = range === "24h" ?   8_200 : range === "7d" ?  74_000 : range === "30d" ?  98_000 :  86_000;
+  const minV   = range === "24h" ?   3_500 : range === "7d" ?  48_000 : range === "30d" ?  62_000 :  38_000;
+
+  // Realistic upload counts per period
+  const baseU  = range === "24h" ?   3.2 : range === "7d" ?  52 : range === "30d" ?  61 : 48;
+  const ampU   = range === "24h" ?   1.8 : range === "7d" ?  22 : range === "30d" ?  26 : 24;
+
   const cycles = range === "24h" ? 2.6 : range === "7d" ? 1.8 : range === "30d" ? 2.2 : 3.4;
+
   for (let i = 0; i < points; i += 1) {
     const back = points - 1 - i;
     const d = new Date(now);
     if (range === "24h") d.setHours(now.getHours() - back);
     else d.setDate(now.getDate() - back);
-    labels.push(range === "24h" ? `${String(d.getHours()).padStart(2, "0")}:00` : `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+    labels.push(range === "24h"
+      ? `${String(d.getHours()).padStart(2, "0")}:00`
+      : `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
 
     const t = points <= 1 ? 0 : i / (points - 1);
-    const wave = Math.sin(t * Math.PI * 2 * cycles);
-    const wave2 = Math.sin((t * Math.PI * 2 * (cycles * 0.5)) + 0.8);
-    const noise = (rnd() - 0.5) * amp * 0.18;
-    const drift = t * amp * 0.55;
-    const v = Math.max(900, base + drift + wave * amp * 0.55 + wave2 * amp * 0.22 + noise);
-    views.push(v);
 
-    const uplWave = Math.sin((t * Math.PI * 2 * cycles) + 0.65);
-    const uploadsLike = Math.max(700, v * (0.52 + uplWave * 0.08) + (rnd() - 0.5) * amp * 0.08);
-    uploads.push(Math.max(1, uploadsLike));
+    // Views: upward growth trend + waves + noise
+    const wave  = Math.sin(t * Math.PI * 2 * cycles);
+    const wave2 = Math.sin(t * Math.PI * 2 * cycles * 0.5 + 0.8);
+    const noiseV = (rnd() - 0.5) * ampV * 0.22;
+    const driftV = t * ampV * 0.65;
+    views.push(Math.round(Math.max(minV, baseV + driftV + wave * ampV * 0.48 + wave2 * ampV * 0.18 + noiseV)));
+
+    // Uploads: actual count, separate scale — slightly correlated with views activity
+    const waveU  = Math.sin(t * Math.PI * 2 * cycles + 0.65);
+    const noiseU = (rnd() - 0.5) * ampU * 0.35;
+    const driftU = t * ampU * 0.45;
+    uploads.push(Math.round(Math.max(range === "24h" ? 1 : 12, baseU + driftU + waveU * ampU * 0.5 + noiseU)));
   }
   return { labels, views, uploads };
 }
@@ -238,14 +252,14 @@ export function DashboardPage() {
     const hasRealAnalytics = analytics.length > 0 && (totalViews > 0 || totalLikes > 0);
     if (!hasRealAnalytics) {
       return {
-        totalVideos: 347,
-        totalViews: 84200,
-        views7: 25100,
-        likeRate: 5.72,
+        totalVideos: 4_820,
+        totalViews: 8_240_000,
+        views7: 1_830_000,
+        likeRate: 6.14,
         queueCount: 8,
         activeTasks: 6,
-        successTasks: 65,
-        failedTasks: 4,
+        successTasks: 4_612,
+        failedTasks: 38,
         channelsCount: 12,
         healthy: 9,
         watch: 2,
@@ -254,15 +268,15 @@ export function DashboardPage() {
         views30: DEMO_VIEWS_30,
         uploads30: DEMO_UPLOADS_30,
         channels: [
-          { name: "KR_shorts_01", total: 28, success: 22, error: 1, active: 2, health: 86 },
-          { name: "KR_shorts_02", total: 24, success: 18, error: 2, active: 1, health: 75 },
-          { name: "TH_react_01", total: 16, success: 10, error: 3, active: 2, health: 62 },
-          { name: "VN_story_04", total: 13, success: 7, error: 3, active: 1, health: 54 },
-          { name: "KR_casino_03", total: 12, success: 3, error: 5, active: 1, health: 25 },
+          { name: "KR_shorts_01", total: 1140, success: 1082, error: 11, active: 4, health: 95 },
+          { name: "KR_shorts_02", total: 980, success: 912, error: 24, active: 3, health: 93 },
+          { name: "TH_react_01", total: 870, success: 774, error: 41, active: 5, health: 89 },
+          { name: "VN_story_04", total: 640, success: 537, error: 58, active: 3, health: 84 },
+          { name: "KR_casino_03", total: 510, success: 204, error: 196, active: 2, health: 40 },
         ],
         alerts: [
-          { name: "KR_casino_03", text: "Низкое здоровье: 25%", color: "var(--accent-red)" },
-          { name: "VN_story_04", text: "Ошибок: 3", color: "var(--accent-amber)" },
+          { name: "KR_casino_03", text: "Низкое здоровье: 40%", color: "var(--accent-red)" },
+          { name: "VN_story_04", text: "Ошибок: 58", color: "var(--accent-amber)" },
         ],
         heatClasses: [
           ["", "", "l1", "l1", "l1", "l2", "l2", "l2", "l3", "l3", "l4", "l4", "l3", "l3", "l2", "l2", "l3", "l4", "l4", "l5", "l4", "l3", "l2", "l1"],
@@ -311,10 +325,12 @@ export function DashboardPage() {
   const chartViews = rawChartViews.filter((_, i) => i % sampleStep === 0);
   const chartUploads = rawChartUploads.filter((_, i) => i % sampleStep === 0);
   const chartLabels = rawChartLabels.filter((_, i) => i % sampleStep === 0);
-  const chartMax = Math.max(1, ...chartViews, ...chartUploads);
+  const chartMax = Math.max(1, ...chartViews);
   const chartMaxPadded = Math.max(1, Math.round(chartMax * 1.1));
+  const maxRealUploads = Math.max(1, ...chartUploads);
+  const uploadsScaled = chartUploads.map((u) => Math.round((u / maxRealUploads) * chartMaxPadded * 0.55));
   const viewsPoints = polyline(chartViews, 600, 170, chartMaxPadded);
-  const uploadsPoints = polyline(chartUploads, 600, 170, chartMaxPadded);
+  const uploadsPoints = polyline(uploadsScaled, 600, 170, chartMaxPadded);
   const viewsArea = areaPath(chartViews, 600, 170, chartMaxPadded);
   const chartStep = chartViews.length > 1 ? 600 / (chartViews.length - 1) : 600;
   const hoverIndex = chartHoverIndex == null ? null : Math.max(0, Math.min(chartViews.length - 1, chartHoverIndex));
@@ -322,7 +338,8 @@ export function DashboardPage() {
   const hoverViews = hoverIndex == null ? 0 : chartViews[hoverIndex];
   const hoverUploads = hoverIndex == null ? 0 : chartUploads[hoverIndex];
   const hoverYViews = hoverIndex == null ? 0 : 170 - (hoverViews / chartMaxPadded) * (170 - 12);
-  const hoverYUploads = hoverIndex == null ? 0 : 170 - (hoverUploads / chartMaxPadded) * (170 - 12);
+  const hoverUploadScaled = hoverIndex == null ? 0 : uploadsScaled[hoverIndex];
+  const hoverYUploads = hoverIndex == null ? 0 : 170 - (hoverUploadScaled / chartMaxPadded) * (170 - 12);
   const hoverDay = hoverIndex == null ? "" : `${chartLabels[hoverIndex] || `${hoverIndex + 1}`}`;
   const yTicks = [0.85, 0.6, 0.35].map((ratio) => Math.round(chartMaxPadded * ratio));
   const donutRadius = 56;
@@ -373,8 +390,12 @@ export function DashboardPage() {
         <div className="viz-card" style={{ position: "relative" }}>
           <div className="viz-header">
             <div>
-              <div className="viz-title">Просмотры за 30 дней</div>
-              <div className="viz-subtitle">Демо-статистика: проверка переключателей периода</div>
+              <div className="viz-title">
+                {chartRange === "24h" ? "Просмотры за 24 часа" : chartRange === "7d" ? "Просмотры за 7 дней" : chartRange === "30d" ? "Просмотры за 30 дней" : "Просмотры за 90 дней"}
+              </div>
+              <div className="viz-subtitle">
+                {dashboardQ.data?.summary ? "Данные бэкенда" : "Демо-данные · подключите бэкенд для live-статистики"}
+              </div>
             </div>
             <div style={{ display: "flex", gap: 4 }}>
               {[
@@ -578,7 +599,7 @@ export function DashboardPage() {
           <div style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 9, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)", textAlign: "right", paddingRight: 4 }}>
             {dayLabels.map((d) => <div key={d}>{d}</div>)}
           </div>
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 3 }}>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 3, maxWidth: 580 }}>
             {derived.heatClasses.map((row, ri) => (
               <div key={ri} className="heatmap">
                 {row.map((cls, ci) => <div key={ci} className={`heatmap-cell${cls ? ` ${cls}` : ""}`} />)}

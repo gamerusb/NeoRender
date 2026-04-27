@@ -3126,39 +3126,64 @@ async def research_download(tenant_id: TenantDep, body: dict):
 @app.post("/api/research/arbitrage-scan")
 async def research_arbitrage_scan(tenant_id: TenantDep, body: dict):
     """
-    Scan YouTube Shorts for arbitrage gaming videos across known game patterns.
-    Body: { games?, region? (пусто = весь мир), period_days?, limit_per_query?,
-            shorts_only? (default true), fetch_multiplier? (default 5) }
-    Returns: { status, results: {game_key: [video, ...]}, labels: {game_key: label}, colors: {game_key: color} }
+    UBT stealth scan (2026) — finds arbitrage videos by behavioral patterns,
+    not game/casino names (those get blocked by YouTube).
+
+    mode = "stealth" (default) — behavioral categories:
+        shock-reaction / secret-method / new-app / multiplier /
+        lifestyle / urgency / withdrawal-proof / phone-screen
+    mode = "legacy" — old game-name based scan (still supported)
+
+    Body: { mode?, categories?, region?, period_days?, limit_per_query?,
+            shorts_only?, fetch_multiplier? }
+    Returns: { status, results, labels, colors, monitor }
     """
     try:
         monitor_cfg = _load_arbitrage_monitor_cfg()
         watchlist_channels = monitor_cfg.get("watchlist_channels")
         if not isinstance(watchlist_channels, list):
             watchlist_channels = []
-        score_threshold = max(1, min(int(monitor_cfg.get("score_threshold") or 70), 100))
+        score_threshold = max(1, min(int(monitor_cfg.get("score_threshold") or 60), 100))
         alerts_enabled = bool(monitor_cfg.get("alerts_enabled", True))
         alert_max_items = max(1, min(int(monitor_cfg.get("alert_max_items") or 5), 10))
 
-        games = body.get("games") or None
+        mode = str(body.get("mode") or "stealth").strip().lower()
         raw_region = body.get("region", None)
-        if raw_region is None or str(raw_region).strip() == "":
-            region = None  # глобальный поиск (без regionCode)
-        else:
-            region = str(raw_region).strip().upper()
-        period_days = max(1, min(int(body.get("period_days") or 7), 30))
-        limit_per_query = max(1, min(int(body.get("limit_per_query") or 5), 10))
-        shorts_only = bool(body.get("shorts_only", True))
+        region = None if (raw_region is None or str(raw_region).strip() == "") else str(raw_region).strip().upper()
+        period_days     = max(1, min(int(body.get("period_days") or 7), 30))
+        limit_per_query = max(1, min(int(body.get("limit_per_query") or 4), 10))
+        shorts_only     = bool(body.get("shorts_only", True))
         fetch_multiplier = max(1, min(8, int(body.get("fetch_multiplier") or 5)))
-        results = await content_scraper.scan_arbitrage_videos(
-            games=games,
-            region=region,
-            period_days=period_days,
-            limit_per_query=limit_per_query,
-            shorts_only=shorts_only,
-            fetch_multiplier=fetch_multiplier,
-            watchlist_channels=watchlist_channels,
-        )
+
+        if mode == "legacy":
+            # Old game-name based scan (for backward compatibility)
+            games = body.get("games") or None
+            results = await content_scraper.scan_arbitrage_videos(
+                games=games,
+                region=region,
+                period_days=period_days,
+                limit_per_query=limit_per_query,
+                shorts_only=shorts_only,
+                fetch_multiplier=fetch_multiplier,
+                watchlist_channels=watchlist_channels,
+            )
+            labels = content_scraper.ARBITRAGE_GAME_LABELS
+            colors = content_scraper.ARBITRAGE_GAME_COLORS
+        else:
+            # 2026 stealth behavioral scan
+            categories = body.get("categories") or None
+            results = await content_scraper.scan_stealth_videos(
+                categories=categories,
+                region=region,
+                period_days=period_days,
+                limit_per_query=limit_per_query,
+                shorts_only=shorts_only,
+                fetch_multiplier=fetch_multiplier,
+                watchlist_channels=watchlist_channels,
+            )
+            labels = content_scraper.STEALTH_CATEGORY_LABELS
+            colors = content_scraper.STEALTH_CATEGORY_COLORS
+
         alerted = 0
         if alerts_enabled:
             alerted = await _send_arbitrage_alerts(
@@ -3168,8 +3193,9 @@ async def research_arbitrage_scan(tenant_id: TenantDep, body: dict):
             )
         return _json_ok({
             "results": results,
-            "labels": content_scraper.ARBITRAGE_GAME_LABELS,
-            "colors": content_scraper.ARBITRAGE_GAME_COLORS,
+            "labels": labels,
+            "colors": colors,
+            "mode": mode,
             "monitor": {
                 "watchlist_size": len(watchlist_channels),
                 "score_threshold": score_threshold,

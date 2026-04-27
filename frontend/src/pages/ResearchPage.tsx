@@ -26,6 +26,11 @@ type VideoResult = {
   arb_score?: number;
   watchlist_hit?: boolean;
   watchlist_match?: string;
+  ubt_niche?: string;
+  ubt_marker?: boolean;
+  ubt_masking_hits?: string[];
+  ubt_shorteners?: string[];
+  risk_tier?: "low" | "medium" | "high";
 };
 
 type QueuedFile = { filename: string; path: string; size_mb: number; modified: number };
@@ -57,12 +62,20 @@ type ArbMonitorSettings = {
   watchlist_channels: string[];
 };
 
-/** Порядок вкладок в «Арбитраж скан» (совпадает с бэкендом). */
+/**
+ * Stealth UBT категории (2026).
+ * Арбитражники не называют игры в заголовке — YouTube банит.
+ * Ищем по поведенческим паттернам: реакция/секрет/приложение/мультипликатор.
+ */
 const ARB_GAMES = [
-  { key: "tower_rust", label: "Tower Rust", color: "#F59E0B" },
-  { key: "mine_drop", label: "Mine Drop", color: "#EF4444" },
-  { key: "aviator", label: "Avia Master", color: "#3B82F6" },
-  { key: "ice_fishing", label: "Ice Fishing", color: "#06B6D4" },
+  { key: "money_reaction",   label: "Шок-реакция",     color: "#10B981" },
+  { key: "secret_method",    label: "Секретный метод",  color: "#8B5CF6" },
+  { key: "new_app",          label: "Новое приложение", color: "#3B82F6" },
+  { key: "multiplier",       label: "Мультипликатор",   color: "#EF4444" },
+  { key: "lifestyle",        label: "Пассивный доход",  color: "#F59E0B" },
+  { key: "urgency",          label: "Срочность",        color: "#F97316" },
+  { key: "withdrawal_proof", label: "Вывод / Скрин",    color: "#06B6D4" },
+  { key: "phone_screen",     label: "Экран телефона",   color: "#EC4899" },
 ] as const;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -583,7 +596,11 @@ export function ResearchPage() {
     mutationFn: (_?: undefined) =>
       apiFetch<ApiJson>("/api/research/arbitrage-scan", {
         method: "POST", tenantId,
-        body: JSON.stringify({ period_days: arbScanPeriod, limit_per_query: 5 }),
+        body: JSON.stringify({
+          mode: "stealth",
+          period_days: arbScanPeriod,
+          limit_per_query: 4,
+        }),
       }),
     onSuccess: (data) => {
       const res = data.results as ArbScanResults | undefined;
@@ -933,18 +950,18 @@ export function ResearchPage() {
           <span className="card-title" style={{ fontSize: 12 }}>Пресеты ниш</span>
           <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>Нажмите для вставки в поиск</span>
         </div>
-        <div className="card-body" style={{ padding: "0 16px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+        <div className="card-body" style={{ padding: "4px 18px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
           {/* Saved presets group */}
           {savedPresets.length > 0 && (
             <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent-cyan)", marginBottom: 6 }}>⭐ Мои пресеты</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent-cyan)", marginBottom: 8 }}>⭐ Мои пресеты</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {savedPresets.map((p) => (
                   <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 0 }}>
                     <button type="button"
                       onClick={() => applyPreset(p.niche, p)}
                       style={{
-                        padding: "4px 10px", borderRadius: "20px 0 0 20px",
+                        padding: "6px 12px", borderRadius: "20px 0 0 20px",
                         border: `1px solid ${niche === p.niche ? "var(--accent-cyan)" : "var(--border-default)"}`,
                         borderRight: "none",
                         background: niche === p.niche ? "rgba(94,234,212,0.1)" : "var(--bg-elevated)",
@@ -958,7 +975,7 @@ export function ResearchPage() {
                     <button type="button"
                       onClick={() => deletePreset(p.id)}
                       style={{
-                        padding: "4px 7px", borderRadius: "0 20px 20px 0",
+                        padding: "6px 8px", borderRadius: "0 20px 20px 0",
                         border: `1px solid ${niche === p.niche ? "var(--accent-cyan)" : "var(--border-default)"}`,
                         borderLeft: "1px solid var(--border-subtle)",
                         background: niche === p.niche ? "rgba(94,234,212,0.1)" : "var(--bg-elevated)",
@@ -1073,12 +1090,13 @@ export function ResearchPage() {
               <span className="arb-scan-beta">BETA</span>
             </span>
             <span className="arb-scan-legend">
-              Tower · Mine · Aviator · Ice Fishing
+              Шок-реакция · Секретный метод · Новое приложение · Мультипликатор · Пассивный доход · Срочность · Вывод/Скрин · Экран телефона
             </span>
           </div>
           <p className="arb-scan-desc">
-            Поиск по YouTube Shorts (до 60 с) по всему миру, без привязки к ГЕО — запросы под типичные заливы арбитража
-            (big win, x100, crash, strategy, #shorts). Выберите окно публикации и нажмите скан.
+            Поиск по <b>поведенческим паттернам</b> — арбитражники не пишут названия игр в заголовке (YouTube банит).
+            Ищем «реакцию на деньги», «секретный метод», «новое приложение» — без упоминания казино.
+            UBT Score = пустое описание + профиль-CTA + мультипликатор + emoji-плотность + view/sub аномалия.
           </p>
         </div>
         <div className="card-body arb-scan-body">
@@ -1237,7 +1255,8 @@ export function ResearchPage() {
               <div className="arb-scan-placeholder-icon" aria-hidden>◇</div>
               <div className="arb-scan-placeholder-title">Ещё не сканировали</div>
               <p className="arb-scan-placeholder-text">
-                Нажмите «Сканировать игры» — вкладки по четырём играм и списки Shorts за выбранный период (поиск глобальный).
+                Нажмите «Сканировать» — 8 поведенческих категорий, ~130 поисковых запросов (RU/EN/KO/TH/VI).
+                Каждое видео получает UBT Score: пустое описание, profile-CTA, мультипликатор, view/sub аномалия.
               </p>
             </div>
           ) : (
@@ -1321,8 +1340,16 @@ export function ResearchPage() {
                                 <div className="arb-meta-chips">
                                   <span className="arb-meta-chip arb-meta-chip-strong">{formatNum(video.view_count)} просм.</span>
                                   {(video.arb_score ?? 0) > 0 && (
-                                    <span className={`arb-meta-chip arb-er-chip ${(video.arb_score ?? 0) >= 75 ? "arb-er-high" : (video.arb_score ?? 0) >= 55 ? "arb-er-mid" : ""}`}>
-                                      Score {video.arb_score}
+                                    <span className={`arb-meta-chip arb-er-chip ${(video.arb_score ?? 0) >= 75 ? "arb-er-high" : (video.arb_score ?? 0) >= 50 ? "arb-er-mid" : ""}`}>
+                                      UBT {video.arb_score}
+                                    </span>
+                                  )}
+                                  {video.ubt_marker && (
+                                    <span className="arb-meta-chip arb-er-chip arb-er-high" title="Высокая вероятность маскировки">⚡ MASK</span>
+                                  )}
+                                  {video.ubt_niche && (
+                                    <span className="arb-meta-chip" style={{ textTransform: "uppercase", fontSize: 9, letterSpacing: "0.04em", opacity: 0.85 }}>
+                                      {video.ubt_niche}
                                     </span>
                                   )}
                                   {video.watchlist_hit && (
@@ -1630,20 +1657,20 @@ export function ResearchPage() {
         .preset-layout {
           display: grid;
           grid-template-columns: minmax(170px, 220px) 1fr;
-          gap: 10px;
+          gap: 16px;
           align-items: start;
         }
         .preset-groups {
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 9px;
         }
         .preset-group-btn {
           display: flex;
           align-items: center;
           justify-content: space-between;
           width: 100%;
-          padding: 6px 9px;
+          padding: 8px 12px;
           border-radius: 8px;
           border: 1px solid var(--border-subtle);
           background: var(--bg-elevated);
@@ -1661,21 +1688,21 @@ export function ResearchPage() {
           border: 1px solid var(--border-subtle);
           border-radius: 10px;
           background: var(--bg-elevated);
-          padding: 11px;
+          padding: 16px;
           min-height: 132px;
         }
         .preset-tags-header {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
-          gap: 10px;
-          margin-bottom: 10px;
+          gap: 12px;
+          margin-bottom: 14px;
         }
         .preset-meta-row {
           display: flex;
           flex-wrap: wrap;
-          gap: 6px;
-          margin-bottom: 10px;
+          gap: 8px;
+          margin-bottom: 14px;
         }
         .preset-meta-chip {
           font-size: 10px;
@@ -1689,13 +1716,13 @@ export function ResearchPage() {
         .preset-tags-grid {
           display: grid;
           grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-          gap: 8px;
+          gap: 12px;
         }
         .preset-tag-card {
           display: flex;
           align-items: center;
-          gap: 6px;
-          padding: 4px;
+          gap: 8px;
+          padding: 8px;
           border: 1px solid var(--border-subtle);
           border-radius: 10px;
           background: rgba(255,255,255,0.01);

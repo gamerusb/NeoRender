@@ -46,8 +46,8 @@ export function QueuePage() {
   const tasksQ = useQuery({
     queryKey: ["queue-tasks", tenantId],
     queryFn: () => apiFetch<ApiJson>("/api/tasks?limit=200", { tenantId }),
-    refetchInterval: 3000,
-    staleTime: 2000,
+    refetchInterval: 8_000,
+    staleTime: 5_000,
   });
 
   const cancelMut = useMutation({
