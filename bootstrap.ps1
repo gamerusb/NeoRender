@@ -49,12 +49,29 @@ Write-Host "Installing dependencies..." -ForegroundColor Cyan
 & $venvPython -m pip install --upgrade pip setuptools wheel
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& $venvPython -m pip install -r (Join-Path $ProjectRoot "requirements.txt")
+$requirementsPath = Join-Path $ProjectRoot "requirements.txt"
+& $venvPython -m pip install -r $requirementsPath
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
-    Write-Host "Dependency installation failed." -ForegroundColor Red
-    Write-Host "Tip: make sure you use Python 3.10 for best compatibility on Windows." -ForegroundColor Yellow
-    exit $LASTEXITCODE
+    Write-Host "Full dependency install failed." -ForegroundColor Yellow
+    Write-Host "Retrying without faster-whisper (Windows fallback)..." -ForegroundColor Yellow
+
+    $fallbackPath = Join-Path $ProjectRoot "requirements.windows.fallback.txt"
+    Get-Content -LiteralPath $requirementsPath |
+        Where-Object { $_ -notmatch '^\s*faster-whisper\s*==' } |
+        Set-Content -LiteralPath $fallbackPath
+
+    & $venvPython -m pip install -r $fallbackPath
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "Dependency installation failed." -ForegroundColor Red
+        Write-Host "Tip: install Microsoft C++ Build Tools or use a machine where wheels are available." -ForegroundColor Yellow
+        exit $LASTEXITCODE
+    }
+
+    Write-Host ""
+    Write-Host "Fallback install succeeded." -ForegroundColor Green
+    Write-Host "Speech-to-text via faster-whisper is disabled on this machine." -ForegroundColor Yellow
 }
 
 Write-Host ""
