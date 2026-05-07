@@ -12,6 +12,7 @@ import {
   Briefcase,
   CalendarDays,
   Captions,
+  ChevronDown,
   ChevronsLeft,
   ChevronsRight,
   CircleCheck,
@@ -19,6 +20,7 @@ import {
   Crosshair,
   Download,
   Flame,
+  Cookie,
   Globe2,
   Info,
   LayoutDashboard,
@@ -57,6 +59,7 @@ const pageTitles: Record<string, string> = {
   "/campaigns": "Кампании",
   "/proxy": "Прокси-мониторинг",
   "/warmup": "Прогрев каналов",
+  "/cookie-farmer": "Cookie Farmer",
   "/accounts": "Аккаунты",
   "/profile-links": "Profile Links",
   "/profile-jobs": "Profile Jobs",
@@ -120,6 +123,7 @@ function useNavSections(tenantId: string): NavSection[] {
         { to: "/uploads", label: "История заливов", icon: <CalendarDays {...NAV} aria-hidden /> },
         { to: "/proxy", label: "Прокси", icon: <Globe2 {...NAV} aria-hidden /> },
         { to: "/warmup", label: "Прогрев", icon: <Flame {...NAV} aria-hidden /> },
+        { to: "/cookie-farmer", label: "Cookie Farmer", icon: <Cookie {...NAV} aria-hidden /> },
         { to: "/accounts", label: "Аккаунты", icon: <Users {...NAV} aria-hidden /> },
         { to: "/profile-links", label: "Profile Links", icon: <Link2 {...NAV} aria-hidden /> },
         { to: "/profile-jobs", label: "Profile Jobs", icon: <Briefcase {...NAV} aria-hidden /> },
@@ -170,6 +174,7 @@ export function Layout() {
     tenantId === "default" ? "default" : "custom"
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [infraOpen, setInfraOpen] = useState(false);
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [toasts, setToasts] = useState<{ id: number; type: string; msg: string }[]>([]);
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
@@ -285,27 +290,44 @@ export function Layout() {
         </div>
 
         <nav className="sidebar-nav" style={{ display: "flex", flexDirection: "column" }}>
-          {navSections.map((section) => (
-            <div key={section.title}>
-              <div className="nav-section-title">{section.title}</div>
-              {section.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  title={item.label}
-                  className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+          {navSections.map((section) => {
+            const isInfra = section.title === "Инфраструктура";
+            const isCollapsed = isInfra && !infraOpen && !sidebarCollapsed;
+            return (
+              <div key={section.title}>
+                <div
+                  className="nav-section-title"
+                  style={isInfra ? { cursor: "pointer", userSelect: "none" } : undefined}
+                  onClick={isInfra ? () => setInfraOpen((v) => !v) : undefined}
                 >
-                  <span className="nav-icon" style={{ width: 18, height: 18 }}>
-                    {item.icon}
-                  </span>
-                  <span className="nav-item-label">{item.label}</span>
-                  {item.badge != null && (
-                    <span className="nav-badge">{item.badge}</span>
+                  {section.title}
+                  {isInfra && !sidebarCollapsed && (
+                    <ChevronDown
+                      size={11}
+                      style={{ marginLeft: "auto", marginRight: 0, flexShrink: 0, opacity: 0.5, transition: "transform 200ms", transform: infraOpen ? "rotate(180deg)" : "none" }}
+                      aria-hidden
+                    />
                   )}
-                </NavLink>
-              ))}
-            </div>
-          ))}
+                </div>
+                {!isCollapsed && section.items.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    title={item.label}
+                    className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+                  >
+                    <span className="nav-icon" style={{ width: 18, height: 18 }}>
+                      {item.icon}
+                    </span>
+                    <span className="nav-item-label">{item.label}</span>
+                    {item.badge != null && (
+                      <span className="nav-badge">{item.badge}</span>
+                    )}
+                  </NavLink>
+                ))}
+              </div>
+            );
+          })}
         </nav>
 
         <div className="antidetect-select">
@@ -480,7 +502,7 @@ export function Layout() {
           </div>
         </header>
 
-        <div className="content react-main-stack">
+        <div key={location.key} className="content react-main-stack">
           <Outlet />
         </div>
       </main>

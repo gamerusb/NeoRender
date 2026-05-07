@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS antidetect_browsers (
     tenant_id TEXT NOT NULL DEFAULT 'default',
     name TEXT NOT NULL,
     browser_type TEXT NOT NULL DEFAULT 'adspower'
-        CHECK (browser_type IN ('adspower', 'dolphin', 'octo', 'multilogin', 'custom')),
+        CHECK (browser_type IN ('adspower', 'dolphin', 'octo', 'multilogin', 'gologin', 'undetectable', 'morelogin', 'custom')),
     api_url TEXT NOT NULL,
     api_key TEXT NOT NULL DEFAULT '',
     use_auth INTEGER NOT NULL DEFAULT 0,
@@ -202,6 +202,36 @@ CREATE INDEX IF NOT EXISTS idx_pj_type ON profile_jobs(tenant_id, job_type);
 CREATE INDEX IF NOT EXISTS idx_pj_scheduled ON profile_jobs(tenant_id, scheduled_at) WHERE scheduled_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_pe_tenant ON profile_events(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_pe_profile ON profile_events(tenant_id, adspower_profile_id);
+"""
+
+
+_PROXIES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS proxies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
+    name TEXT NOT NULL DEFAULT '',
+    protocol TEXT NOT NULL DEFAULT 'http'
+        CHECK (protocol IN ('http', 'https', 'socks5')),
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    username TEXT NOT NULL DEFAULT '',
+    password TEXT NOT NULL DEFAULT '',
+    group_name TEXT NOT NULL DEFAULT '',
+    geo TEXT,
+    geo_city TEXT,
+    detected_ip TEXT,
+    status TEXT NOT NULL DEFAULT 'unchecked'
+        CHECK (status IN ('alive', 'slow', 'dead', 'unchecked')),
+    latency_ms INTEGER,
+    last_checked_at TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(tenant_id, host, port)
+);
+CREATE INDEX IF NOT EXISTS idx_proxies_tenant ON proxies(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_proxies_status ON proxies(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_proxies_group ON proxies(tenant_id, group_name);
 """
 
 
@@ -314,6 +344,38 @@ CREATE INDEX IF NOT EXISTS idx_campaign_runs_tenant ON campaign_runs(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_runs_status ON campaign_runs(tenant_id, status);
 """
 
+_WARMUP_SESSIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS warmup_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
+    profile_id TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'youtube',
+    intensity TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'success', 'error', 'cancelled')),
+    logged_in INTEGER NOT NULL DEFAULT 0,
+    prewarm_done INTEGER NOT NULL DEFAULT 0,
+    videos_watched INTEGER NOT NULL DEFAULT 0,
+    shorts_watched INTEGER NOT NULL DEFAULT 0,
+    searches_done INTEGER NOT NULL DEFAULT 0,
+    likes_given INTEGER NOT NULL DEFAULT 0,
+    subscriptions INTEGER NOT NULL DEFAULT 0,
+    comments_left INTEGER NOT NULL DEFAULT 0,
+    channels_visited INTEGER NOT NULL DEFAULT 0,
+    actions_count INTEGER NOT NULL DEFAULT 0,
+    warnings_count INTEGER NOT NULL DEFAULT 0,
+    stats_json TEXT,
+    actions_json TEXT,
+    error_message TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ws_tenant ON warmup_sessions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_ws_profile ON warmup_sessions(tenant_id, profile_id);
+CREATE INDEX IF NOT EXISTS idx_ws_status ON warmup_sessions(tenant_id, status);
+"""
+
+
 _AUTH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -333,6 +395,21 @@ CREATE INDEX IF NOT EXISTS idx_users_role ON users(tenant_id, role);
 CREATE INDEX IF NOT EXISTS idx_users_status ON users(tenant_id, status);
 """
 
+_ADMIN_AUDIT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS admin_user_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
+    admin_user_id INTEGER NOT NULL,
+    target_user_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_aue_tenant ON admin_user_events(tenant_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_aue_target ON admin_user_events(tenant_id, target_user_id, id DESC);
+"""
+
 
 async def _ensure_schema(db: aiosqlite.Connection) -> None:
     cur = await db.execute(
@@ -345,6 +422,8 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
         await db.executescript(_CAMPAIGNS_SCHEMA)
         await db.executescript(_CAMPAIGN_RUNS_SCHEMA)
         await db.executescript(_AUTH_SCHEMA)
+        await db.executescript(_ADMIN_AUDIT_SCHEMA)
+        await db.executescript(_WARMUP_SESSIONS_SCHEMA)
         await db.commit()
         return
     await _migrate_legacy_schema(db)
@@ -431,10 +510,55 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_ap_antidetect ON adspower_profiles(antidetect_id)"
     )
+    await db.executescript(_PROXIES_SCHEMA)
     await db.executescript(_CAMPAIGNS_SCHEMA)
     await db.executescript(_CAMPAIGN_RUNS_SCHEMA)
     await db.executescript(_AUTH_SCHEMA)
+    await db.executescript(_ADMIN_AUDIT_SCHEMA)
+    await db.executescript(_WARMUP_SESSIONS_SCHEMA)
+    # Миграция: добавить proxy_id на профили
+    cur_ap2 = await db.execute("PRAGMA table_info(adspower_profiles)")
+    apcols2 = {r[1] for r in await cur_ap2.fetchall()}
+    if "proxy_id" not in apcols2:
+        await db.execute("ALTER TABLE adspower_profiles ADD COLUMN proxy_id INTEGER REFERENCES proxies(id) ON DELETE SET NULL")
     await db.commit()
+    # Миграция: обновить CHECK constraint antidetect_browsers (добавить gologin, undetectable, morelogin).
+    # SQLite не поддерживает ALTER TABLE MODIFY — пересоздаём таблицу.
+    cur_adb = await db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='antidetect_browsers'"
+    )
+    adb_row = await cur_adb.fetchone()
+    if adb_row and "gologin" not in (adb_row[0] or ""):
+        await db.executescript("""
+            CREATE TABLE antidetect_browsers_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                name TEXT NOT NULL,
+                browser_type TEXT NOT NULL DEFAULT 'adspower'
+                    CHECK (browser_type IN ('adspower','dolphin','octo','multilogin',
+                                            'gologin','undetectable','morelogin','custom')),
+                api_url TEXT NOT NULL,
+                api_key TEXT NOT NULL DEFAULT '',
+                use_auth INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                profiles_count INTEGER NOT NULL DEFAULT 0,
+                last_synced_at TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(tenant_id, name)
+            );
+            INSERT OR IGNORE INTO antidetect_browsers_v2
+                SELECT id,tenant_id,name,browser_type,api_url,api_key,
+                       use_auth,is_active,profiles_count,last_synced_at,
+                       notes,created_at,updated_at
+                FROM antidetect_browsers;
+            DROP TABLE antidetect_browsers;
+            ALTER TABLE antidetect_browsers_v2 RENAME TO antidetect_browsers;
+            CREATE INDEX IF NOT EXISTS idx_adb_tenant ON antidetect_browsers(tenant_id);
+            CREATE INDEX IF NOT EXISTS idx_adb_active ON antidetect_browsers(tenant_id, is_active);
+        """)
+        await db.commit()
 
 
 async def init_db(db_path: str | Path | None = None) -> dict[str, Any]:
@@ -2165,7 +2289,7 @@ async def upsert_antidetect_browser(
         return _error("Имя антидетекта не может быть пустым.")
     if not api_url or not api_url.strip():
         return _error("URL API не может быть пустым.")
-    supported = ("adspower", "dolphin", "octo", "multilogin", "custom")
+    supported = ("adspower", "dolphin", "octo", "multilogin", "gologin", "undetectable", "morelogin", "custom")
     if browser_type not in supported:
         return _error(f"Неподдерживаемый тип: {browser_type}. Допустимые: {', '.join(supported)}.")
     tid = _tid(tenant_id)
@@ -2669,6 +2793,82 @@ async def list_users(
         return _error("Не удалось получить список пользователей.")
 
 
+async def record_admin_user_event(
+    admin_user_id: int,
+    target_user_id: int,
+    action: str,
+    old_value: str | None = None,
+    new_value: str | None = None,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            await db.execute(
+                """
+                INSERT INTO admin_user_events
+                    (tenant_id, admin_user_id, target_user_id, action, old_value, new_value)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tid,
+                    int(admin_user_id),
+                    int(target_user_id),
+                    str(action or "").strip()[:64],
+                    (old_value or "").strip()[:255] or None,
+                    (new_value or "").strip()[:255] or None,
+                ),
+            )
+            await db.commit()
+            return _ok({"recorded": True})
+    except Exception as exc:
+        logger.exception("record_admin_user_event: %s", exc)
+        return _error("Не удалось записать admin audit event.")
+
+
+async def list_admin_user_events(
+    tenant_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    events: list[dict[str, Any]] = []
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT
+                    e.id,
+                    e.admin_user_id,
+                    e.target_user_id,
+                    e.action,
+                    e.old_value,
+                    e.new_value,
+                    e.created_at,
+                    au.email AS admin_email,
+                    tu.email AS target_email
+                FROM admin_user_events e
+                LEFT JOIN users au ON au.tenant_id = e.tenant_id AND au.id = e.admin_user_id
+                LEFT JOIN users tu ON tu.tenant_id = e.tenant_id AND tu.id = e.target_user_id
+                WHERE e.tenant_id = ?
+                ORDER BY e.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (tid, max(1, int(limit)), max(0, int(offset))),
+            )
+            rows = await cur.fetchall()
+            events = [dict(r) for r in rows]
+    except Exception as exc:
+        logger.exception("list_admin_user_events: %s", exc)
+        return _error("Не удалось получить audit log.")
+    return _ok({"events": events, "count": len(events)})
+
+
 async def ensure_default_admin(
     email: str,
     password_hash: str,
@@ -2732,3 +2932,370 @@ async def user_stats(
     except Exception as exc:
         logger.exception("user_stats: %s", exc)
         return _error("Не удалось получить статистику пользователей.")
+
+
+# ── Proxy CRUD ────────────────────────────────────────────────────────────────
+
+async def upsert_proxy(
+    host: str,
+    port: int,
+    protocol: str = "http",
+    username: str = "",
+    password: str = "",
+    name: str = "",
+    group_name: str = "",
+    notes: str = "",
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Создать или обновить прокси (UNIQUE по host+port внутри тенанта)."""
+    if not host or not host.strip():
+        return _error("Хост прокси не может быть пустым.")
+    if not (1 <= port <= 65535):
+        return _error("Некорректный порт прокси.")
+    if protocol not in ("http", "https", "socks5"):
+        return _error("Протокол должен быть http / https / socks5.")
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    label = name.strip() or f"{host.strip()}:{port}"
+    try:
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO proxies
+                    (tenant_id, name, protocol, host, port, username, password,
+                     group_name, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(tenant_id, host, port) DO UPDATE SET
+                    name       = excluded.name,
+                    protocol   = excluded.protocol,
+                    username   = excluded.username,
+                    password   = excluded.password,
+                    group_name = excluded.group_name,
+                    notes      = excluded.notes,
+                    updated_at = datetime('now')
+                """,
+                (tid, label, protocol, host.strip(), port,
+                 username.strip(), password.strip(), group_name.strip(), notes.strip()),
+            )
+            await db.commit()
+            proxy_id = cur.lastrowid
+            if not proxy_id:
+                row = await (await db.execute(
+                    "SELECT id FROM proxies WHERE tenant_id=? AND host=? AND port=?",
+                    (tid, host.strip(), port),
+                )).fetchone()
+                proxy_id = row[0] if row else None
+    except Exception as exc:
+        logger.exception("upsert_proxy: %s", exc)
+        return _error("Не удалось сохранить прокси.")
+    return _ok({"id": proxy_id, "name": label})
+
+
+async def list_proxies(
+    tenant_id: str | None = None,
+    group_name: str | None = None,
+    status_filter: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            where = "WHERE tenant_id = ?"
+            params: list = [tid]
+            if group_name:
+                where += " AND group_name = ?"
+                params.append(group_name)
+            if status_filter:
+                where += " AND status = ?"
+                params.append(status_filter)
+            cur = await db.execute(
+                f"SELECT * FROM proxies {where} ORDER BY group_name, id",
+                params,
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+    except Exception as exc:
+        logger.exception("list_proxies: %s", exc)
+        return _error("Не удалось получить список прокси.")
+    alive = sum(1 for r in rows if r.get("status") == "alive")
+    slow  = sum(1 for r in rows if r.get("status") == "slow")
+    dead  = sum(1 for r in rows if r.get("status") == "dead")
+    return _ok({"proxies": rows, "count": len(rows),
+                "alive": alive, "slow": slow, "dead": dead})
+
+
+async def delete_proxy(
+    proxy_id: int,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute(
+                "DELETE FROM proxies WHERE id = ? AND tenant_id = ?",
+                (proxy_id, tid),
+            )
+            await db.commit()
+            if cur.rowcount == 0:
+                return _error(f"Прокси id={proxy_id} не найден.")
+    except Exception as exc:
+        logger.exception("delete_proxy: %s", exc)
+        return _error("Не удалось удалить прокси.")
+    return _ok({"deleted_id": proxy_id})
+
+
+async def update_proxy_check_result(
+    proxy_id: int,
+    status: str,
+    latency_ms: int | None = None,
+    detected_ip: str | None = None,
+    geo: str | None = None,
+    geo_city: str | None = None,
+    db_path: str | Path | None = None,
+) -> None:
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            await db.execute(
+                """UPDATE proxies SET
+                    status = ?, latency_ms = ?, detected_ip = ?,
+                    geo = COALESCE(?, geo), geo_city = COALESCE(?, geo_city),
+                    last_checked_at = datetime('now'), updated_at = datetime('now')
+                   WHERE id = ?""",
+                (status, latency_ms, detected_ip, geo, geo_city, proxy_id),
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.exception("update_proxy_check_result: %s", exc)
+
+
+async def assign_proxy_to_profile(
+    profile_id: str,
+    proxy_id: int | None,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Привязать/отвязать прокси к профилю (proxy_id=None снимает привязку)."""
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute(
+                """UPDATE adspower_profiles
+                   SET proxy_id = ?, updated_at = datetime('now')
+                   WHERE tenant_id = ? AND adspower_profile_id = ?""",
+                (proxy_id, tid, profile_id),
+            )
+            await db.commit()
+            if cur.rowcount == 0:
+                return _error(f"Профиль {profile_id} не найден.")
+    except Exception as exc:
+        logger.exception("assign_proxy_to_profile: %s", exc)
+        return _error("Не удалось привязать прокси.")
+    return _ok({"profile_id": profile_id, "proxy_id": proxy_id})
+
+
+async def get_profile_proxy(
+    profile_id: str,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Вернуть прокси, привязанный к профилю (если есть)."""
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT p.* FROM proxies p
+                   JOIN adspower_profiles ap ON ap.proxy_id = p.id
+                   WHERE ap.tenant_id = ? AND ap.adspower_profile_id = ?""",
+                (tid, profile_id),
+            )
+            row = await cur.fetchone()
+    except Exception as exc:
+        logger.exception("get_profile_proxy: %s", exc)
+        return _error("Не удалось получить прокси профиля.")
+    if not row:
+        return _ok({"proxy": None})
+    return _ok({"proxy": dict(row)})
+
+
+async def count_uploads_today(
+    profile_id: str,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """Сколько успешных загрузок сделал профиль сегодня (UTC)."""
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute(
+                """SELECT COUNT(*) FROM tasks
+                   WHERE tenant_id = ?
+                     AND target_profile = ?
+                     AND status = 'success'
+                     AND DATE(updated_at) = DATE('now')""",
+                (tid, profile_id),
+            )
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+    except Exception as exc:
+        logger.exception("count_uploads_today: %s", exc)
+        return 0
+
+
+async def get_profile_daily_limit(
+    profile_id: str,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """Дневной лимит загрузок профиля (default = 3)."""
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute(
+                """SELECT daily_upload_limit FROM adspower_profiles
+                   WHERE tenant_id=? AND adspower_profile_id=?""",
+                (tid, profile_id),
+            )
+            row = await cur.fetchone()
+            return int(row[0]) if row else 3
+    except Exception as exc:
+        logger.exception("get_profile_daily_limit: %s", exc)
+        return 3
+
+
+# ─── Warmup Sessions ──────────────────────────────────────────────────────────
+
+
+async def create_warmup_session(
+    profile_id: str,
+    intensity: str,
+    platform: str = "youtube",
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Создать запись сессии прогрева со статусом 'running'."""
+    import json as _json
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute(
+                """INSERT INTO warmup_sessions
+                       (tenant_id, profile_id, platform, intensity, status, started_at)
+                   VALUES (?, ?, ?, ?, 'running', datetime('now'))""",
+                (tid, profile_id, platform, intensity),
+            )
+            await db.commit()
+            return _ok({"session_id": cur.lastrowid})
+    except Exception as exc:
+        logger.exception("create_warmup_session: %s", exc)
+        return _error("Не удалось создать запись сессии прогрева.")
+
+
+async def finish_warmup_session(
+    session_id: int,
+    status: str,
+    *,
+    stats: dict[str, Any] | None = None,
+    actions_log: list[str] | None = None,
+    error_message: str | None = None,
+    logged_in: bool = False,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Обновить запись сессии прогрева после завершения."""
+    import json as _json
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    s = stats or {}
+    try:
+        async with aiosqlite.connect(path) as db:
+            await db.execute(
+                """UPDATE warmup_sessions SET
+                       status=?, finished_at=datetime('now'),
+                       logged_in=?, prewarm_done=?,
+                       videos_watched=?, shorts_watched=?,
+                       searches_done=?, likes_given=?,
+                       subscriptions=?, comments_left=?,
+                       channels_visited=?,
+                       actions_count=?, warnings_count=?,
+                       stats_json=?, actions_json=?,
+                       error_message=?
+                   WHERE id=? AND tenant_id=?""",
+                (
+                    status,
+                    int(logged_in),
+                    int(bool(s.get("prewarm_done"))),
+                    int(s.get("videos_watched") or 0),
+                    int(s.get("shorts_watched") or 0),
+                    int(s.get("searches_done") or 0),
+                    int(s.get("likes_given") or 0),
+                    int(s.get("subscriptions") or 0),
+                    int(s.get("comments_left") or 0),
+                    int(s.get("channels_visited") or 0),
+                    len(actions_log or []),
+                    len([a for a in (actions_log or []) if "failed" in a]),
+                    _json.dumps(s, ensure_ascii=False) if s else None,
+                    _json.dumps(actions_log, ensure_ascii=False) if actions_log else None,
+                    error_message,
+                    session_id,
+                    tid,
+                ),
+            )
+            await db.commit()
+            return _ok({"session_id": session_id})
+    except Exception as exc:
+        logger.exception("finish_warmup_session: %s", exc)
+        return _error("Не удалось обновить запись сессии прогрева.")
+
+
+async def list_warmup_sessions(
+    profile_id: str | None = None,
+    limit: int = 50,
+    tenant_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Список сессий прогрева (последние N)."""
+    tid = _tid(tenant_id)
+    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    try:
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            if profile_id:
+                cur = await db.execute(
+                    """SELECT id, profile_id, platform, intensity, status,
+                              logged_in, prewarm_done, videos_watched, shorts_watched,
+                              searches_done, likes_given, subscriptions, comments_left,
+                              channels_visited, actions_count, warnings_count,
+                              error_message, started_at, finished_at
+                       FROM warmup_sessions
+                       WHERE tenant_id=? AND profile_id=?
+                       ORDER BY id DESC LIMIT ?""",
+                    (tid, profile_id, max(1, min(200, limit))),
+                )
+            else:
+                cur = await db.execute(
+                    """SELECT id, profile_id, platform, intensity, status,
+                              logged_in, prewarm_done, videos_watched, shorts_watched,
+                              searches_done, likes_given, subscriptions, comments_left,
+                              channels_visited, actions_count, warnings_count,
+                              error_message, started_at, finished_at
+                       FROM warmup_sessions
+                       WHERE tenant_id=?
+                       ORDER BY id DESC LIMIT ?""",
+                    (tid, max(1, min(200, limit))),
+                )
+            rows = await cur.fetchall()
+            return _ok({"sessions": [dict(r) for r in rows]})
+    except Exception as exc:
+        logger.exception("list_warmup_sessions: %s", exc)
+        return _error("Не удалось загрузить историю прогревов.")

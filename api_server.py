@@ -27,6 +27,7 @@ from typing import Annotated
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
@@ -44,12 +45,13 @@ from core import overlay_paths
 from core import profile_job_runner
 from core import storage as storage_mod
 from core import content_scraper
+from core import ubt_detector
 from core import subtitle_generator
 from core import auth as auth_core
 from core.main_loop import AutomationPipeline
 from core.tenancy import normalize_tenant_id, tenant_id_from_environ
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, encoding="utf-8")
 logger = logging.getLogger(__name__)
 
 from contextlib import asynccontextmanager
@@ -88,14 +90,47 @@ async def _lifespan(_app: FastAPI):
         await _ensure_demo_auth_users()
     except Exception as exc:
         logger.warning("startup demo users: %s", exc)
-    # Инициализация реестра антидетект-браузеров
+    # Инициализация реестра антидетект-браузеров + health-check
     try:
-        from core.antidetect_registry import init_registry
-        await init_registry()
+        from core.antidetect_registry import init_registry, get_registry
+        registry = await init_registry()
         logger.info("antidetect_registry: loaded")
+        # Проверить доступность всех зарегистрированных браузеров
+        if registry.count() > 0:
+            try:
+                health = await registry.verify_all()
+                results = health.get("results") or []
+                for r in results:
+                    aid = r.get("antidetect_id")
+                    btype = r.get("browser_type", "?")
+                    if r.get("status") == "ok":
+                        logger.info("antidetect id=%s (%s): online ✓", aid, btype)
+                    else:
+                        logger.warning(
+                            "antidetect id=%s (%s): OFFLINE — %s "
+                            "(убедитесь что приложение запущено)",
+                            aid, btype, r.get("message", "no response"),
+                        )
+            except Exception as exc:
+                logger.warning("antidetect health-check: %s", exc)
+        else:
+            logger.info("antidetect_registry: нет зарегистрированных браузеров (добавьте в Profiles → Antidetect Browsers)")
     except Exception as exc:
         logger.warning("antidetect_registry startup: %s", exc)
+    # Запуск MediaScanQueue (воркеры + предзагрузка Whisper)
+    try:
+        from core.media_scanner import get_media_scan_queue
+        await get_media_scan_queue().start()
+        logger.info("media_scanner: queue started")
+    except Exception as exc:
+        logger.warning("media_scanner startup: %s", exc)
     yield
+    # Остановка MediaScanQueue при shutdown
+    try:
+        from core.media_scanner import get_media_scan_queue
+        await get_media_scan_queue().stop()
+    except Exception as exc:
+        logger.warning("media_scanner shutdown: %s", exc)
 
 
 app = FastAPI(title="NeoRender Pro API", version="0.3", lifespan=_lifespan)
@@ -135,11 +170,41 @@ async def _ui_entry_no_cache(request: Request, call_next):
 _pipelines: dict[str, AutomationPipeline] = {}
 
 
+_bearer_scheme_optional = HTTPBearer(auto_error=False)
+
+
 async def get_tenant_id(
+    request: Request,
     x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-ID")] = None,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme_optional)] = None,
 ) -> str:
+    """
+    Приоритет tenant_id:
+    1. JWT токен (Bearer или cookie) — нельзя подделать заголовком
+    2. X-Tenant-ID заголовок — только для публичных/dev эндпоинтов
+    3. ENV переменная NEORENDER_TENANT_ID
+    """
+    # 1. Попытка извлечь из JWT (Bearer или cookie)
+    token: str | None = None
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    else:
+        token = request.cookies.get("neo_token")
+
+    if token:
+        try:
+            payload = auth_core.decode_token(token)
+            tid = str(payload.get("tenant_id") or "").strip()
+            if tid:
+                return normalize_tenant_id(tid)
+        except Exception:
+            pass  # невалидный токен — продолжаем к fallback
+
+    # 2. X-Tenant-ID заголовок (публичные эндпоинты / локальный запуск)
     if x_tenant_id and str(x_tenant_id).strip():
         return normalize_tenant_id(x_tenant_id)
+
+    # 3. ENV
     return tenant_id_from_environ()
 
 
@@ -174,6 +239,16 @@ class AuthChangePasswordBody(BaseModel):
 
 class AdminPlanBody(BaseModel):
     plan: str
+
+
+class AdminRoleBody(BaseModel):
+    role: str
+
+
+class AdminBulkUsersBody(BaseModel):
+    user_ids: list[int]
+    action: str
+    value: str | None = None
 
 
 @app.get("/api/auth/ping")
@@ -285,6 +360,14 @@ async def admin_ban_user(user_id: int, tenant_id: TenantDep, admin: auth_core.Ad
     upd = await dbmod.update_user(user_id, status="banned", tenant_id=tenant_id)
     if upd.get("status") != "ok":
         return JSONResponse(upd, status_code=400)
+    await dbmod.record_admin_user_event(
+        admin_user_id=admin.user_id,
+        target_user_id=user_id,
+        action="status",
+        old_value=str((check.get("user") or {}).get("status") or ""),
+        new_value="banned",
+        tenant_id=tenant_id,
+    )
     return _json_ok({"user": upd.get("user")})
 
 
@@ -293,9 +376,18 @@ async def admin_unban_user(user_id: int, tenant_id: TenantDep, _admin: auth_core
     check = await dbmod.get_user_by_id(user_id, tenant_id=tenant_id)
     if check.get("status") != "ok":
         return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=404)
+    old_status = str((check.get("user") or {}).get("status") or "")
     upd = await dbmod.update_user(user_id, status="active", tenant_id=tenant_id)
     if upd.get("status") != "ok":
         return JSONResponse(upd, status_code=400)
+    await dbmod.record_admin_user_event(
+        admin_user_id=_admin.user_id,
+        target_user_id=user_id,
+        action="status",
+        old_value=old_status,
+        new_value="active",
+        tenant_id=tenant_id,
+    )
     return _json_ok({"user": upd.get("user")})
 
 
@@ -304,10 +396,106 @@ async def admin_change_plan(user_id: int, body: AdminPlanBody, tenant_id: Tenant
     check = await dbmod.get_user_by_id(user_id, tenant_id=tenant_id)
     if check.get("status") != "ok":
         return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=404)
-    upd = await dbmod.update_user(user_id, plan=str(body.plan or "").lower(), tenant_id=tenant_id)
+    old_plan = str((check.get("user") or {}).get("plan") or "")
+    new_plan = str(body.plan or "").lower()
+    upd = await dbmod.update_user(user_id, plan=new_plan, tenant_id=tenant_id)
     if upd.get("status") != "ok":
         return JSONResponse(upd, status_code=400)
+    await dbmod.record_admin_user_event(
+        admin_user_id=_admin.user_id,
+        target_user_id=user_id,
+        action="plan",
+        old_value=old_plan,
+        new_value=new_plan,
+        tenant_id=tenant_id,
+    )
     return _json_ok({"user": upd.get("user")})
+
+
+@app.post("/api/admin/users/{user_id}/role")
+async def admin_change_role(user_id: int, body: AdminRoleBody, tenant_id: TenantDep, admin: auth_core.AdminUser):
+    if int(user_id) == int(admin.user_id):
+        return JSONResponse({"status": "error", "message": "Нельзя изменить роль самому себе."}, status_code=400)
+    role = str(body.role or "").strip().lower()
+    if role not in ("user", "admin"):
+        return JSONResponse({"status": "error", "message": "Недопустимая роль. Используйте user/admin."}, status_code=400)
+    check = await dbmod.get_user_by_id(user_id, tenant_id=tenant_id)
+    if check.get("status") != "ok":
+        return JSONResponse({"status": "error", "message": "Пользователь не найден."}, status_code=404)
+    old_role = str((check.get("user") or {}).get("role") or "")
+    upd = await dbmod.update_user(user_id, role=role, tenant_id=tenant_id)
+    if upd.get("status") != "ok":
+        return JSONResponse(upd, status_code=400)
+    await dbmod.record_admin_user_event(
+        admin_user_id=admin.user_id,
+        target_user_id=user_id,
+        action="role",
+        old_value=old_role,
+        new_value=role,
+        tenant_id=tenant_id,
+    )
+    return _json_ok({"user": upd.get("user")})
+
+
+@app.post("/api/admin/users/bulk")
+async def admin_bulk_users(body: AdminBulkUsersBody, tenant_id: TenantDep, admin: auth_core.AdminUser):
+    ids = sorted({int(x) for x in (body.user_ids or []) if int(x) > 0})
+    if not ids:
+        return JSONResponse({"status": "error", "message": "Выберите пользователей."}, status_code=400)
+    action = str(body.action or "").strip().lower()
+    if action not in {"ban", "unban", "plan", "role"}:
+        return JSONResponse({"status": "error", "message": "Недопустимое действие bulk."}, status_code=400)
+    if action in {"plan", "role"} and not str(body.value or "").strip():
+        return JSONResponse({"status": "error", "message": "Для этого действия нужно значение value."}, status_code=400)
+
+    changed = 0
+    skipped = 0
+    for uid in ids:
+        if uid == int(admin.user_id):
+            skipped += 1
+            continue
+        check = await dbmod.get_user_by_id(uid, tenant_id=tenant_id)
+        if check.get("status") != "ok":
+            skipped += 1
+            continue
+        user = check.get("user") or {}
+        old_val = ""
+        upd = {"status": "error"}
+        if action == "ban":
+            old_val = str(user.get("status") or "")
+            upd = await dbmod.update_user(uid, status="banned", tenant_id=tenant_id)
+            if upd.get("status") == "ok":
+                await dbmod.record_admin_user_event(admin.user_id, uid, "status", old_val, "banned", tenant_id=tenant_id)
+        elif action == "unban":
+            old_val = str(user.get("status") or "")
+            upd = await dbmod.update_user(uid, status="active", tenant_id=tenant_id)
+            if upd.get("status") == "ok":
+                await dbmod.record_admin_user_event(admin.user_id, uid, "status", old_val, "active", tenant_id=tenant_id)
+        elif action == "plan":
+            new_plan = str(body.value or "").strip().lower()
+            old_val = str(user.get("plan") or "")
+            upd = await dbmod.update_user(uid, plan=new_plan, tenant_id=tenant_id)
+            if upd.get("status") == "ok":
+                await dbmod.record_admin_user_event(admin.user_id, uid, "plan", old_val, new_plan, tenant_id=tenant_id)
+        elif action == "role":
+            new_role = str(body.value or "").strip().lower()
+            old_val = str(user.get("role") or "")
+            upd = await dbmod.update_user(uid, role=new_role, tenant_id=tenant_id)
+            if upd.get("status") == "ok":
+                await dbmod.record_admin_user_event(admin.user_id, uid, "role", old_val, new_role, tenant_id=tenant_id)
+        if upd.get("status") == "ok":
+            changed += 1
+        else:
+            skipped += 1
+    return _json_ok({"changed": changed, "skipped": skipped})
+
+
+@app.get("/api/admin/users/audit")
+async def admin_users_audit(tenant_id: TenantDep, _admin: auth_core.AdminUser, limit: int = 100, offset: int = 0):
+    out = await dbmod.list_admin_user_events(tenant_id=tenant_id, limit=limit, offset=offset)
+    if out.get("status") != "ok":
+        return JSONResponse(out, status_code=400)
+    return _json_ok({"events": out.get("events") or [], "count": out.get("count", 0)})
 
 
 @app.get("/api/admin/stats")
@@ -445,7 +633,10 @@ async def _send_arbitrage_alerts(
 async def _ensure_demo_auth_users() -> None:
     """
     Локальные demo-аккаунты для страницы логина (не трогаем существующие записи).
+    Создаются только при NEORENDER_DEV_SEED=1 — никогда в production.
     """
+    if os.environ.get("NEORENDER_DEV_SEED", "").strip() != "1":
+        return
     try:
         demo_users = [
             {
@@ -547,7 +738,7 @@ def _schedule_profile_job_execution(
 
 
 @app.get("/api/health")
-async def health(tenant_id: TenantDep):
+async def health(tenant_id: TenantDep, _user: auth_core.CurrentUser):
     pipe = _pipeline_for(tenant_id)
     try:
         disk = shutil.disk_usage(Path("."))
@@ -574,7 +765,7 @@ async def health(tenant_id: TenantDep):
 
 
 @app.get("/api/health/workers")
-async def health_workers(tenant_id: TenantDep):
+async def health_workers(tenant_id: TenantDep, _user: auth_core.CurrentUser):
     pipe = _pipeline_for(tenant_id)
     return _json_ok(
         {
@@ -592,7 +783,7 @@ async def health_workers(tenant_id: TenantDep):
 
 
 @app.get("/api/system/status")
-async def system_status(tenant_id: TenantDep):
+async def system_status(tenant_id: TenantDep, _user: auth_core.CurrentUser):
     """
     Сводный статус для UI: ключи, overlay, ffmpeg, API AdsPower.
     Не выполняет тяжёлых действий, только быстрые проверки.
@@ -632,7 +823,7 @@ async def system_status(tenant_id: TenantDep):
 
 
 @app.get("/api/system/ffmpeg-config")
-async def ffmpeg_config():
+async def ffmpeg_config(_user: auth_core.CurrentUser):
     """Текущая конфигурация FFmpeg пайплайна (для диагностики в UI)."""
     try:
         ffmpeg_bin_cfg = (os.environ.get("FFMPEG_PATH") or "ffmpeg").strip() or "ffmpeg"
@@ -713,7 +904,7 @@ class AdsPowerConfigBody(BaseModel):
 
 
 @app.get("/api/adspower/status")
-async def adspower_status():
+async def adspower_status(_user: auth_core.CurrentUser):
     """Текущие настройки API AdsPower (без проверки сети)."""
     try:
         return adspower_sync.get_api_settings_status()
@@ -723,7 +914,7 @@ async def adspower_status():
 
 
 @app.post("/api/adspower/settings")
-async def adspower_save_settings(body: AdsPowerConfigBody):
+async def adspower_save_settings(body: AdsPowerConfigBody, _user: auth_core.AdminUser):
     """Сохранить адрес API, ключ и режим Bearer-авторизации для Local API AdsPower."""
     try:
         r = adspower_sync.configure_api_settings(
@@ -779,6 +970,7 @@ class WarmupRunBody(BaseModel):
     profile_id: str
     intensity: str = "medium"          # light | medium | deep
     niche_keywords: list[str] = []
+    shorts_retention_mode: str = "mixed"  # mixed | looper | engaged | casual | bouncer
 
 
 class AdsPowerProfilePatchBody(BaseModel):
@@ -821,9 +1013,123 @@ class PublishJobBody(BaseModel):
     run_now: bool = True
 
 
+# ---------------------------------------------------------------------------
+# In-memory store for background warmup jobs.
+# Each entry: {status, profile_id, intensity, tenant_id, stats, actions_log,
+#              message, started_at, finished_at, cancel_event, task}
+# ---------------------------------------------------------------------------
+_WARMUP_JOBS: dict[str, dict] = {}
+
+
+@app.post("/api/warmup/start")
+async def warmup_start(tenant_id: TenantDep, body: WarmupRunBody):
+    """Запустить прогрев в фоне. Возвращает job_id для опроса статуса."""
+    import uuid as _uuid
+    import time as _time
+
+    job_id = str(_uuid.uuid4())
+    cancel_event = asyncio.Event()
+
+    _WARMUP_JOBS[job_id] = {
+        "status": "running",
+        "profile_id": body.profile_id,
+        "intensity": body.intensity,
+        "tenant_id": tenant_id,
+        "stats": {},
+        "actions_log": [],
+        "message": None,
+        "started_at": _time.time(),
+        "finished_at": None,
+        "cancel_event": cancel_event,
+    }
+
+    async def _run() -> None:
+        try:
+            from core import warmup_automator as _wu
+            result = await _wu.run_warmup_for_profile(
+                profile_id=body.profile_id,
+                intensity=body.intensity,
+                niche_keywords=body.niche_keywords or None,
+                tenant_id=tenant_id,
+                cancel_event=cancel_event,
+                shorts_retention_mode=body.shorts_retention_mode,
+            )
+        except Exception as exc:
+            logger.exception("warmup background job %s: %s", job_id, exc)
+            result = {"status": "error", "message": str(exc)}
+
+        job = _WARMUP_JOBS.get(job_id)
+        if job is None:
+            return
+        cancelled = cancel_event.is_set()
+        job["status"] = "cancelled" if cancelled else result.get("status", "error")
+        job["stats"] = result.get("stats") or {}
+        job["actions_log"] = result.get("actions_log") or []
+        job["message"] = result.get("message")
+        job["finished_at"] = _time.time()
+
+    asyncio.create_task(_run())
+    return _json_ok({"job_id": job_id, "status": "running"})
+
+
+@app.get("/api/warmup/status/{job_id}")
+async def warmup_status(job_id: str, tenant_id: TenantDep):
+    """Текущий статус / частичные результаты фонового прогрева."""
+    job = _WARMUP_JOBS.get(job_id)
+    if job is None:
+        return JSONResponse({"status": "error", "message": "Задача не найдена."}, status_code=404)
+    if job["tenant_id"] != tenant_id:
+        return JSONResponse({"status": "error", "message": "Нет доступа."}, status_code=403)
+    return _json_ok({
+        "job_id":       job_id,
+        "status":       job["status"],
+        "profile_id":   job["profile_id"],
+        "intensity":    job["intensity"],
+        "stats":        job["stats"],
+        "actions_log":  job["actions_log"],
+        "message":      job["message"],
+        "started_at":   job["started_at"],
+        "finished_at":  job["finished_at"],
+    })
+
+
+@app.delete("/api/warmup/cancel/{job_id}")
+async def warmup_cancel(job_id: str, tenant_id: TenantDep):
+    """Отменить фоновый прогрев."""
+    job = _WARMUP_JOBS.get(job_id)
+    if job is None:
+        return JSONResponse({"status": "error", "message": "Задача не найдена."}, status_code=404)
+    if job["tenant_id"] != tenant_id:
+        return JSONResponse({"status": "error", "message": "Нет доступа."}, status_code=403)
+    if job["status"] == "running":
+        job["cancel_event"].set()
+        job["status"] = "cancelling"
+    return _json_ok({"job_id": job_id, "status": job["status"]})
+
+
+@app.get("/api/warmup/history")
+async def warmup_history(
+    tenant_id: TenantDep,
+    profile_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """История сессий прогрева из БД."""
+    try:
+        result = await dbmod.list_warmup_sessions(
+            profile_id=profile_id,
+            limit=limit,
+            tenant_id=tenant_id,
+        )
+        return result
+    except Exception as exc:
+        logger.exception("warmup_history: %s", exc)
+        return {"status": "error", "message": "Ошибка получения истории прогрева."}
+
+
+# Keep the old blocking endpoint as an alias for backwards compatibility.
 @app.post("/api/warmup/run")
 async def warmup_run(tenant_id: TenantDep, body: WarmupRunBody):
-    """Запустить сессию прогрева для профиля AdsPower."""
+    """[Устарело] Блокирующий запуск прогрева. Используйте /api/warmup/start."""
     try:
         from core import warmup_automator as _wu
         result = await _wu.run_warmup_for_profile(
@@ -831,6 +1137,7 @@ async def warmup_run(tenant_id: TenantDep, body: WarmupRunBody):
             intensity=body.intensity,
             niche_keywords=body.niche_keywords or None,
             tenant_id=tenant_id,
+            shorts_retention_mode=body.shorts_retention_mode,
         )
         return result
     except Exception as exc:
@@ -911,7 +1218,7 @@ async def adspower_profile_resume(profile_id: str, tenant_id: TenantDep):
 async def adspower_profile_launch_test(profile_id: str, tenant_id: TenantDep):
     try:
         pipe = _pipeline_for(tenant_id)
-        health = await adspower_launcher.check_profile_health(profile_id)
+        health = await adspower_launcher.check_profile_health(profile_id, tenant_id=tenant_id)
         if health.get("status") == "ok":
             await dbmod.update_adspower_profile_launch(profile_id, tenant_id=tenant_id, db_path=pipe.db_path)
             await adspower_profiles.record_profile_event(
@@ -2530,6 +2837,8 @@ class UniqualizerSettingsBody(BaseModel):
     perceptual_hash_check: bool | None = None
     tags: list[str] | None = None
     thumbnail_path: str | None = None
+    shorts_loop: bool | None = None
+    shorts_loop_fade_sec: float | None = None
     # Системные настройки: переключают env vars и сохраняются в neo_settings.json.
     disable_nvenc: bool | None = None
     groq_model: str | None = None
@@ -2565,6 +2874,8 @@ async def uniqualizer_settings_status(tenant_id: TenantDep):
                 "perceptual_hash_check": getattr(pipe, "perceptual_hash_check", True),
                 "tags": list(getattr(pipe, "tags", []) or []),
                 "thumbnail_path": getattr(pipe, "thumbnail_path", "") or "",
+                "shorts_loop": getattr(pipe, "shorts_loop", False),
+                "shorts_loop_fade_sec": getattr(pipe, "shorts_loop_fade_sec", 0.5),
                 "disable_nvenc": os.environ.get("NEORENDER_DISABLE_NVENC", "").strip().lower() in ("1", "true", "yes", "on"),
                 "groq_model": os.environ.get("GROQ_MODEL", ""),
                 "available_presets": luxury_engine.get_render_presets(),
@@ -2634,6 +2945,8 @@ async def uniqualizer_settings_save(tenant_id: TenantDep, body: UniqualizerSetti
             perceptual_hash_check=body.perceptual_hash_check,
             tags=body.tags,
             thumbnail_path=body.thumbnail_path,
+            shorts_loop=body.shorts_loop,
+            shorts_loop_fade_sec=body.shorts_loop_fade_sec,
         )
         if result.get("status") != "ok":
             return result
@@ -3060,14 +3373,54 @@ async def telegram_ping():
 
 @app.post("/api/ai/preview")
 async def ai_preview(tenant_id: TenantDep, body: dict):
+    """
+    Генерация метаданных. Поддерживает расширенный режим:
+      hook_pattern  : "curiosity" | "number" | "interrupt" | "auto"
+      n_variants    : 1–10 (сколько вариантов заголовка вернуть)
+      competitor_examples : [{title, view_count}] — из /api/research/search
+    """
     try:
         niche = str(body.get("niche") or "YouTube Shorts")
-        return await ai_copywriter.generate_metadata(
-            _pipeline_for(tenant_id).groq_api_key, niche
+        hook_pattern = str(body.get("hook_pattern") or "auto")
+        n_variants = max(1, min(10, int(body.get("n_variants") or 5)))
+        competitor_examples = body.get("competitor_examples") or []
+        if not isinstance(competitor_examples, list):
+            competitor_examples = []
+        return await ai_copywriter.generate_viral_metadata(
+            api_key=_pipeline_for(tenant_id).groq_api_key,
+            niche=niche,
+            competitor_examples=competitor_examples,
+            hook_pattern=hook_pattern,
+            n_variants=n_variants,
         )
     except Exception as exc:
         logger.exception("%s", exc)
         return {"status": "error", "message": "Ошибка AI."}
+
+
+@app.post("/api/ai/caption-sequence")
+async def ai_caption_sequence(tenant_id: TenantDep, body: dict):
+    """
+    Генерирует 3-фазную caption-последовательность для Shorts.
+    Возвращает SRT-строку готовую к использованию в уникализаторе.
+
+    Body: {niche, duration_sec, competitor_examples?}
+    """
+    try:
+        niche = str(body.get("niche") or "YouTube Shorts")
+        duration_sec = max(5.0, float(body.get("duration_sec") or 30.0))
+        competitor_examples = body.get("competitor_examples") or []
+        if not isinstance(competitor_examples, list):
+            competitor_examples = []
+        return await ai_copywriter.generate_caption_sequence(
+            api_key=_pipeline_for(tenant_id).groq_api_key,
+            niche=niche,
+            duration_sec=duration_sec,
+            competitor_examples=competitor_examples,
+        )
+    except Exception as exc:
+        logger.exception("ai_caption_sequence: %s", exc)
+        return {"status": "error", "message": "Ошибка генерации captions."}
 
 
 # ──────────────────────────── Content Research ────────────────────────────────
@@ -3076,26 +3429,66 @@ async def ai_preview(tenant_id: TenantDep, body: dict):
 async def research_search(tenant_id: TenantDep, body: dict):
     """Search for trending videos by niche and source."""
     try:
-        niche = str(body.get("niche") or "")
-        if not niche.strip():
-            return JSONResponse({"status": "error", "message": "Укажите нишу"}, status_code=400)
+        niche = str(body.get("niche") or "").strip()
+        use_ubt_seeds = bool(body.get("use_ubt_seeds", True))
+        if not niche and not use_ubt_seeds:
+            return JSONResponse({"status": "error", "message": "Укажите нишу или включите режим UBT-сидов"}, status_code=400)
         source = str(body.get("source") or "youtube").lower()
         period_days = int(body.get("period_days") or 7)
-        # limit <= 0 или сильно отрицательный даёт в Python results[limit] пустой список при успешном поиске.
         limit = max(1, min(int(body.get("limit") or 12), 25))
         region = str(body.get("region") or "KR").upper()
+        shorts_only = bool(body.get("shorts_only", True))
+        fetch_multiplier = max(1, min(6, int(body.get("fetch_multiplier") or 3)))
+        rm_raw = body.get("recent_max_hours")
+        recent_max_hours: float | None = None
+        if rm_raw is not None and str(rm_raw).strip() != "":
+            try:
+                recent_max_hours = float(rm_raw)
+            except (TypeError, ValueError):
+                recent_max_hours = None
+        if recent_max_hours is not None and recent_max_hours <= 0:
+            recent_max_hours = None
         results = await content_scraper.search_videos(
             niche=niche,
             source=source,
             period_days=period_days,
             limit=limit,
             region=region,
+            shorts_only=shorts_only,
+            fetch_multiplier=fetch_multiplier,
+            use_ubt_seed_queries=use_ubt_seeds,
+            recent_max_hours=recent_max_hours,
         )
         return {"status": "ok", "results": results, "total": len(results)}
     except RuntimeError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=503)
     except Exception as exc:
         logger.exception("research_search: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/research/trending-audio")
+async def research_trending_audio(tenant_id: TenantDep, body: dict):
+    """
+    Возвращает топ трендовых аудио-треков по нише за последние 14 дней.
+    Использует yt-dlp метаданные track/artist из топ Shorts.
+
+    Body: {niche, top_n?, region?}
+    """
+    try:
+        niche = str(body.get("niche") or "")
+        if not niche.strip():
+            return JSONResponse({"status": "error", "message": "Укажите нишу"}, status_code=400)
+        top_n = max(5, min(30, int(body.get("top_n") or 20)))
+        region = str(body.get("region") or "KR").upper()
+        result = await content_scraper.get_trending_audio(
+            niche=niche,
+            top_n=top_n,
+            region=region,
+        )
+        return result
+    except Exception as exc:
+        logger.exception("research_trending_audio: %s", exc)
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
@@ -3205,6 +3598,207 @@ async def research_arbitrage_scan(tenant_id: TenantDep, body: dict):
         })
     except Exception as exc:
         logger.exception("arbitrage_scan: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/research/media-scan")
+async def research_media_scan(tenant_id: TenantDep, body: dict):
+    """
+    Запускает мультимодальный анализ видео (OpenCV + faster-whisper).
+    Неблокирующий: ставит задачу в очередь и возвращает сразу.
+
+    Body: { "video_id": "abc123", "url": "https://...", "duration": 30.0 }
+
+    Response (pending):  { status, state: "pending",  video_id }
+    Response (ready):    { status, state: "ready",    video_id, result: MediaScanResult }
+    Response (error):    { status, state: "error",    video_id, error: str }
+    """
+    try:
+        from core.media_scanner import get_media_scan_queue
+
+        video_id = str(body.get("video_id") or "").strip()
+        url      = str(body.get("url")      or "").strip()
+        duration = float(body.get("duration") or 0)
+
+        if not video_id:
+            return JSONResponse({"status": "error", "message": "video_id обязателен"}, status_code=400)
+        if not url or not url.startswith("http"):
+            return JSONResponse({"status": "error", "message": "url невалидный"}, status_code=400)
+
+        queue  = get_media_scan_queue()
+        future = await queue.submit(video_id=video_id, url=url, duration=duration)
+
+        # Если результат уже готов — возвращаем сразу
+        if future.done():
+            if future.cancelled():
+                return _json_ok({"state": "error", "video_id": video_id, "error": "cancelled"})
+            exc = future.exception()
+            if exc:
+                return _json_ok({"state": "error", "video_id": video_id, "error": str(exc)})
+            return _json_ok({"state": "ready", "video_id": video_id, "result": future.result().to_dict()})
+
+        return _json_ok({
+            "state":    "pending",
+            "video_id": video_id,
+            "queue_size": queue.queue_size(),
+        })
+
+    except Exception as exc:
+        logger.exception("media_scan: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/research/media-scan/{video_id}")
+async def research_media_scan_poll(tenant_id: TenantDep, video_id: str):
+    """
+    Polling-эндпоинт: проверить готовность результата медиа-скана.
+
+    Response (pending): { status, state: "pending" }
+    Response (ready):   { status, state: "ready",  result: MediaScanResult }
+    Response (unknown): { status, state: "unknown" } — не было submit()
+    """
+    try:
+        from core.media_scanner import get_media_scan_queue
+
+        queue = get_media_scan_queue()
+
+        if queue.is_pending(video_id):
+            return _json_ok({"state": "pending", "video_id": video_id, "queue_size": queue.queue_size()})
+
+        result = queue.get_result(video_id)
+        if result is None:
+            return _json_ok({"state": "unknown", "video_id": video_id})
+
+        if result.error:
+            return _json_ok({"state": "error", "video_id": video_id, "error": result.error})
+
+        return _json_ok({"state": "ready", "video_id": video_id, "result": result.to_dict()})
+
+    except Exception as exc:
+        logger.exception("media_scan_poll %s: %s", video_id, exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/research/resolve-funnel")
+async def research_resolve_funnel(tenant_id: TenantDep, body: dict):
+    """
+    Раскрутить цепочку редиректов от одного или нескольких URL.
+
+    Body:
+        { "url": "https://bit.ly/..." }           — один URL
+        { "urls": ["https://...", "https://..."] } — пакет до 5 URL
+        { "text": "описание видео с bit.ly/..." } — извлечь URL из текста
+
+    Response:
+        { status, results: [FunnelResult, ...], count: int }
+    """
+    try:
+        from core.funnel_resolver import resolve_funnel, resolve_urls_in_text
+
+        results_raw = []
+
+        # Режим: текст (описание/теги видео)
+        if "text" in body:
+            text = str(body["text"] or "")[:4000]
+            funnels = await resolve_urls_in_text(text, max_urls=5)
+            results_raw = [f.to_dict() for f in funnels]
+
+        # Режим: пакет URL
+        elif "urls" in body:
+            raw_urls = [str(u).strip() for u in (body["urls"] or []) if str(u).strip()][:5]
+            if not raw_urls:
+                return JSONResponse(
+                    {"status": "error", "message": "Список urls пуст"}, status_code=400
+                )
+            gathered = await asyncio.gather(
+                *[resolve_funnel(u) for u in raw_urls],
+                return_exceptions=True,
+            )
+            results_raw = [
+                f.to_dict() if not isinstance(f, Exception)
+                else {"error": str(f), "source_url": raw_urls[i]}
+                for i, f in enumerate(gathered)
+            ]
+
+        # Режим: одиночный URL
+        elif "url" in body:
+            url = str(body["url"] or "").strip()
+            if not url:
+                return JSONResponse(
+                    {"status": "error", "message": "url не задан"}, status_code=400
+                )
+            funnel = await resolve_funnel(url)
+            results_raw = [funnel.to_dict()]
+
+        else:
+            return JSONResponse(
+                {"status": "error", "message": "Нужен один из параметров: url / urls / text"},
+                status_code=400,
+            )
+
+        return _json_ok({"results": results_raw, "count": len(results_raw)})
+
+    except Exception as exc:
+        logger.exception("resolve_funnel: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/research/channel-risk")
+async def research_channel_risk(tenant_id: TenantDep, body: dict):
+    """
+    Риск-анализ YouTube-канала по channel_id или channel_url.
+
+    Body:
+        { "channel_id": "UCxxxxxxxxxxxxxxxxxxxxxxxxx" }
+        { "channel_url": "https://www.youtube.com/channel/UCxxxxx" }
+
+    Response:
+        { status, channel: ChannelRiskResult }
+
+    Требует YOUTUBE_API_KEY в .env или neo_settings.json.
+    """
+    try:
+        from core.channel_analyzer import analyze_channel_risk, extract_channel_id
+
+        # Получаем channel_id из параметров
+        channel_id = str(body.get("channel_id") or "").strip()
+        if not channel_id:
+            ch_url = str(body.get("channel_url") or "").strip()
+            if ch_url:
+                channel_id = extract_channel_id(ch_url) or ""
+
+        if not channel_id:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": (
+                        "Нужен channel_id (UCxxxxxxx) или channel_url. "
+                        "Канал по handle (@name) требует предварительного API-поиска."
+                    ),
+                },
+                status_code=400,
+            )
+
+        # API-ключ: env → neo_settings.json
+        api_key = (os.environ.get("YOUTUBE_API_KEY") or "").strip()
+        if not api_key:
+            try:
+                _settings_path = persisted_cfg.settings_file_path()
+                if _settings_path.is_file():
+                    _raw_cfg = json.loads(_settings_path.read_text(encoding="utf-8"))
+                    api_key = str((_raw_cfg or {}).get("youtube_api_key") or "").strip()
+            except Exception:
+                pass
+
+        result = await analyze_channel_risk(channel_id, api_key=api_key or None)
+
+        if result.error:
+            return JSONResponse({"status": "error", "message": result.error}, status_code=400)
+
+        return _json_ok({"channel": result.to_dict()})
+
+    except Exception as exc:
+        logger.exception("channel_risk: %s", exc)
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
@@ -3416,10 +4010,16 @@ async def research_advice(tenant_id: TenantDep, body: dict):
         if title:
             prompt_niche = f"{prompt_niche}: {title[:120]}"
 
-        ai_meta = await ai_copywriter.generate_metadata(
-            _pipeline_for(tenant_id).groq_api_key,
-            prompt_niche,
+        groq_key = _pipeline_for(tenant_id).groq_api_key
+        ai_meta, ubt_result = await asyncio.gather(
+            ai_copywriter.generate_metadata(groq_key, prompt_niche),
+            ubt_detector.classify_video(body, api_key=groq_key),
+            return_exceptions=True,
         )
+        if isinstance(ai_meta, Exception):
+            ai_meta = {}
+        if isinstance(ubt_result, Exception):
+            ubt_result = {"status": "ERROR", "message": str(ubt_result)}
 
         # ── Detailed scoring engine ──────────────────────────────────────────
         score = 50
@@ -3556,6 +4156,7 @@ async def research_advice(tenant_id: TenantDep, body: dict):
             "ai_comment": ai_meta.get("comment"),
             "overlay_text": ai_meta.get("overlay_text"),
             "used_fallback": bool(ai_meta.get("used_fallback")),
+            "ubt": ubt_result,
             "input": {
                 "title": title,
                 "channel": channel,
@@ -3635,6 +4236,41 @@ async def research_risk_telemetry(tenant_id: TenantDep):
     except Exception as exc:
         logger.exception("research_risk_telemetry: %s", exc)
         return JSONResponse({"status": "error", "message": "Не удалось получить телеметрию риска."}, status_code=500)
+
+
+@app.post("/api/research/ubt-classify")
+async def research_ubt_classify(tenant_id: TenantDep, body: dict):
+    """
+    LLM-классификатор UBT/арбитражного контента.
+    Body: { title, description?, tags?, ocr_text?, transcript?, pinned_comment?, url? }
+    """
+    try:
+        api_key = _pipeline_for(tenant_id).groq_api_key
+        result = await ubt_detector.classify_video(body, api_key=api_key)
+        return _json_ok(result)
+    except Exception as exc:
+        logger.exception("research_ubt_classify: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/research/ubt-batch")
+async def research_ubt_batch(tenant_id: TenantDep, body: dict):
+    """
+    Пакетная LLM-классификация списка видео.
+    Body: { videos: [...], concurrency?: 3 }
+    """
+    try:
+        videos = body.get("videos") or []
+        if not isinstance(videos, list) or not videos:
+            return JSONResponse({"status": "error", "message": "videos must be a non-empty list"}, status_code=400)
+        concurrency = max(1, min(int(body.get("concurrency") or 3), 5))
+        api_key = _pipeline_for(tenant_id).groq_api_key
+        results = await ubt_detector.batch_classify(videos, api_key=api_key, concurrency=concurrency)
+        ubt_count = sum(1 for r in results if r.get("status") == "UBT_FOUND")
+        return _json_ok({"results": results, "total": len(results), "ubt_found": ubt_count})
+    except Exception as exc:
+        logger.exception("research_ubt_batch: %s", exc)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 # ──────────────────────────── Campaigns ───────────────────────────────────────
@@ -4065,6 +4701,46 @@ async def cookie_farmer_status(tenant_id: TenantDep):
     return _json_ok(cookie_farmer.get_status(tenant_id=tenant_id))
 
 
+@app.get("/api/cookie-farmer/profiles")
+async def cookie_farmer_profiles(tenant_id: TenantDep):
+    """Per-profile farming status (last farmed time, total cycles, errors)."""
+    from core import cookie_farmer
+
+    profiles = cookie_farmer.get_profiles_status(tenant_id=tenant_id)
+    return _json_ok({"profiles": profiles})
+
+
+class CookieFarmerRunNowBody(BaseModel):
+    profile_id: str
+    warmup_intensity: str = "light"
+    niche: str = "general"
+    adspower_api_url: str = "http://127.0.0.1:50325"
+
+
+@app.post("/api/cookie-farmer/run-now")
+async def cookie_farmer_run_now(body: CookieFarmerRunNowBody, tenant_id: TenantDep):
+    """Запустить немедленный фарминг для конкретного профиля (без шедулера)."""
+    from core import cookie_farmer
+
+    res = await cookie_farmer.farm_now(
+        profile_id=body.profile_id,
+        tenant_id=tenant_id,
+        warmup_intensity=body.warmup_intensity,
+        niche=body.niche,
+        adspower_api_url=body.adspower_api_url,
+    )
+    return _json_ok(res)
+
+
+@app.delete("/api/cookie-farmer/run-now/{profile_id}")
+async def cookie_farmer_cancel_run_now(profile_id: str, tenant_id: TenantDep):
+    """Отменить ручной фарминг профиля."""
+    from core import cookie_farmer
+
+    res = cookie_farmer.cancel_farm_now(profile_id=profile_id)
+    return _json_ok(res)
+
+
 # ── Antidetect Browsers ───────────────────────────────────────────────────────
 
 class AntidetectBrowserBody(BaseModel):
@@ -4206,6 +4882,162 @@ async def reload_antidetect_registry(tenant_id: TenantDep):
     await get_registry().reload()
     count = get_registry().count()
     return _json_ok({"reloaded": True, "clients_count": count})
+
+
+# ── Proxy Management ─────────────────────────────────────────────────────────
+
+class ProxyBody(BaseModel):
+    host: str
+    port: int
+    protocol: str = "http"
+    username: str = ""
+    password: str = ""
+    name: str = ""
+    group_name: str = ""
+    notes: str = ""
+
+
+class ProxyBulkBody(BaseModel):
+    lines: str          # raw text, one proxy per line
+    protocol: str = "http"
+    group_name: str = ""
+
+
+class ProxyAssignBody(BaseModel):
+    proxy_id: int | None = None   # None = unassign
+
+
+@app.get("/api/proxies")
+async def list_proxies(tenant_id: TenantDep, group: str | None = None, status: str | None = None):
+    res = await dbmod.list_proxies(tenant_id=tenant_id, group_name=group, status_filter=status)
+    if res.get("status") != "ok":
+        raise HTTPException(status_code=500, detail=res.get("message"))
+    return _json_ok(res)
+
+
+@app.post("/api/proxies")
+async def create_proxy(body: ProxyBody, tenant_id: TenantDep):
+    pipe = _pipeline_for(tenant_id)
+    res = await dbmod.upsert_proxy(
+        host=body.host, port=body.port, protocol=body.protocol,
+        username=body.username, password=body.password,
+        name=body.name, group_name=body.group_name, notes=body.notes,
+        tenant_id=tenant_id, db_path=pipe.db_path,
+    )
+    if res.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=res.get("message"))
+    return _json_ok(res)
+
+
+@app.post("/api/proxies/bulk")
+async def create_proxies_bulk(body: ProxyBulkBody, tenant_id: TenantDep):
+    """Массовый импорт прокси (host:port:user:pass или protocol://user:pass@host:port)."""
+    from core.proxy_checker import parse_proxy_line
+    pipe = _pipeline_for(tenant_id)
+    added = 0
+    errors = []
+    for raw_line in body.lines.splitlines():
+        parsed = parse_proxy_line(raw_line)
+        if not parsed:
+            continue
+        res = await dbmod.upsert_proxy(
+            host=parsed["host"], port=parsed["port"],
+            protocol=parsed.get("protocol") or body.protocol,
+            username=parsed.get("username") or "",
+            password=parsed.get("password") or "",
+            group_name=body.group_name,
+            tenant_id=tenant_id, db_path=pipe.db_path,
+        )
+        if res.get("status") == "ok":
+            added += 1
+        else:
+            errors.append({"line": raw_line, "error": res.get("message")})
+    return _json_ok({"added": added, "errors": errors})
+
+
+@app.delete("/api/proxies/{proxy_id}")
+async def delete_proxy(proxy_id: int, tenant_id: TenantDep):
+    pipe = _pipeline_for(tenant_id)
+    res = await dbmod.delete_proxy(proxy_id, tenant_id=tenant_id, db_path=pipe.db_path)
+    if res.get("status") != "ok":
+        raise HTTPException(status_code=404, detail=res.get("message"))
+    return _json_ok(res)
+
+
+@app.post("/api/proxies/{proxy_id}/check")
+async def check_proxy_single(proxy_id: int, tenant_id: TenantDep):
+    """Проверить одну прокси и сохранить результат."""
+    pipe = _pipeline_for(tenant_id)
+    res = await dbmod.list_proxies(tenant_id=tenant_id, db_path=pipe.db_path)
+    proxies = res.get("proxies") or []
+    proxy = next((p for p in proxies if p["id"] == proxy_id), None)
+    if not proxy:
+        raise HTTPException(status_code=404, detail="Прокси не найден.")
+    from core.proxy_checker import check_proxy
+    result = await check_proxy(
+        proxy_id=proxy_id, host=proxy["host"], port=proxy["port"],
+        protocol=proxy.get("protocol") or "http",
+        username=proxy.get("username") or "",
+        password=proxy.get("password") or "",
+        db_path=str(pipe.db_path),
+    )
+    return _json_ok(result)
+
+
+@app.post("/api/proxies/check-all")
+async def check_all_proxies_ep(tenant_id: TenantDep):
+    """Проверить все прокси параллельно (фоновая задача)."""
+    pipe = _pipeline_for(tenant_id)
+    from core.proxy_checker import check_all_proxies
+    result = await check_all_proxies(tenant_id=tenant_id, db_path=str(pipe.db_path))
+    return _json_ok(result)
+
+
+@app.post("/api/proxies/{proxy_id}/assign/{profile_id}")
+async def assign_proxy(proxy_id: int, profile_id: str, tenant_id: TenantDep):
+    """Привязать прокси к профилю."""
+    pipe = _pipeline_for(tenant_id)
+    res = await dbmod.assign_proxy_to_profile(
+        profile_id=profile_id, proxy_id=proxy_id,
+        tenant_id=tenant_id, db_path=pipe.db_path,
+    )
+    if res.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=res.get("message"))
+    return _json_ok(res)
+
+
+@app.delete("/api/proxies/assign/{profile_id}")
+async def unassign_proxy(profile_id: str, tenant_id: TenantDep):
+    """Снять прокси с профиля."""
+    pipe = _pipeline_for(tenant_id)
+    res = await dbmod.assign_proxy_to_profile(
+        profile_id=profile_id, proxy_id=None,
+        tenant_id=tenant_id, db_path=pipe.db_path,
+    )
+    if res.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=res.get("message"))
+    return _json_ok(res)
+
+
+@app.post("/api/proxies/rotate/{profile_id}")
+async def rotate_proxy(profile_id: str, tenant_id: TenantDep):
+    """Ротация: назначить следующую живую прокси из той же группы."""
+    pipe = _pipeline_for(tenant_id)
+    from core.proxy_checker import rotate_proxy_for_profile
+    res = await rotate_proxy_for_profile(
+        profile_id=profile_id, tenant_id=tenant_id, db_path=str(pipe.db_path)
+    )
+    return _json_ok(res)
+
+
+@app.get("/api/proxies/profile/{profile_id}")
+async def get_profile_proxy_ep(profile_id: str, tenant_id: TenantDep):
+    """Прокси, привязанный к профилю."""
+    pipe = _pipeline_for(tenant_id)
+    res = await dbmod.get_profile_proxy(
+        profile_id=profile_id, tenant_id=tenant_id, db_path=pipe.db_path
+    )
+    return _json_ok(res)
 
 
 def _mount_static_ui() -> None:

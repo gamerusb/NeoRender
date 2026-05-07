@@ -6,6 +6,7 @@ import { ShadowbanPage } from "@/pages/ShadowbanPage";
 import { PnLPage } from "@/pages/PnLPage";
 import { ProxyPage } from "@/pages/ProxyPage";
 import { WarmupPage } from "@/pages/WarmupPage";
+import { CookieFarmerPage } from "@/pages/CookieFarmerPage";
 import { ProfilesPage } from "@/pages/ProfilesPage";
 import { PricingPage } from "@/pages/PricingPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -46,6 +47,7 @@ export function App() {
         <Route path="campaigns" element={<CampaignPage />} />
         <Route path="proxy" element={<ProxyPage />} />
         <Route path="warmup" element={<WarmupPage />} />
+        <Route path="cookie-farmer" element={<CookieFarmerPage />} />
         <Route path="accounts" element={<ProfilesPage />} />
         <Route path="profile-links" element={<ProfileLinksPage />} />
         <Route path="profile-jobs" element={<ProfileJobsPage />} />

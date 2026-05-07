@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from core import adspower_sync
     from core import ai_copywriter
     from core import database as dbmod
     from core import luxury_engine
@@ -27,7 +26,6 @@ try:
     from core import subtitle_generator
     from core.hot_folder import HotFolder
 except ImportError:  # запуск из папки core
-    import adspower_sync  # type: ignore
     import ai_copywriter  # type: ignore
     import database as dbmod  # type: ignore
     import luxury_engine  # type: ignore
@@ -174,6 +172,9 @@ class AutomationPipeline:
         self.auto_trim_lead_tail: bool = _env_trim not in ("0", "false", "no", "off")
         _env_phash = (os.environ.get("NEORENDER_PERCEPTUAL_HASH_CHECK") or "").strip().lower()
         self.perceptual_hash_check: bool = _env_phash not in ("0", "false", "no", "off")
+        # Seamless loop для YouTube Shorts (xfade конец→начало).
+        self.shorts_loop: bool = False
+        self.shorts_loop_fade_sec: float = 0.5
         
         # Настройки авто-субтитров/дубляжа
         self.auto_subtitles: bool = (os.environ.get("NEORENDER_AUTO_SUBTITLES", "").lower() in ("1", "true", "yes", "on"))
@@ -379,6 +380,8 @@ class AutomationPipeline:
         perceptual_hash_check: bool | None = None,
         tags: list[str] | None = None,
         thumbnail_path: str | None = None,
+        shorts_loop: bool | None = None,
+        shorts_loop_fade_sec: float | None = None,
     ) -> dict[str, Any]:
         """Обновить runtime-настройки рендера для текущего tenant."""
         try:
@@ -477,6 +480,10 @@ class AutomationPipeline:
                 self.auto_trim_lead_tail = bool(auto_trim_lead_tail)
             if perceptual_hash_check is not None:
                 self.perceptual_hash_check = bool(perceptual_hash_check)
+            if shorts_loop is not None:
+                self.shorts_loop = bool(shorts_loop)
+            if shorts_loop_fade_sec is not None:
+                self.shorts_loop_fade_sec = max(0.2, min(2.0, float(shorts_loop_fade_sec)))
             if tags is not None:
                 if isinstance(tags, list):
                     self.tags = [str(t).strip().lstrip("#") for t in tags if str(t).strip()][:30]
@@ -523,6 +530,8 @@ class AutomationPipeline:
                 "perceptual_hash_check": self.perceptual_hash_check,
                 "tags": list(self.tags),
                 "thumbnail_path": self.thumbnail_path or "",
+                "shorts_loop": self.shorts_loop,
+                "shorts_loop_fade_sec": self.shorts_loop_fade_sec,
             }
         except Exception as exc:
             logger.exception("update_uniqualizer_settings: %s", exc)
@@ -673,6 +682,42 @@ class AutomationPipeline:
                     db_path=self.db_path,
                 )
                 return
+
+            # ── Guard #4: статус профиля (не публиковать если not warmed up) ──
+            if not render_only and profile_id:
+                prof_res = await dbmod.get_adspower_profile(profile_id, tenant_id=self.tenant_id, db_path=self.db_path)
+                prof_status = str((prof_res.get("profile") or {}).get("status") or "")
+                if prof_status in ("new", "archived", "error"):
+                    await dbmod.update_task_status(
+                        task_id,
+                        "error",
+                        error_message=(
+                            f"Профиль {profile_id} имеет статус '{prof_status}' — публикация заблокирована. "
+                            "Прогрейте профиль перед публикацией (статус должен быть ready/warmup/publishing)."
+                        ),
+                        error_type="profile_status",
+                        tenant_id=self.tenant_id,
+                        db_path=self.db_path,
+                    )
+                    return
+
+            # ── Guard #3: дневной лимит загрузок на профиль ───────────────────
+            if not render_only and profile_id:
+                uploads_today = await dbmod.count_uploads_today(profile_id, tenant_id=self.tenant_id, db_path=self.db_path)
+                daily_limit = await dbmod.get_profile_daily_limit(profile_id, tenant_id=self.tenant_id, db_path=self.db_path)
+                if uploads_today >= daily_limit:
+                    await dbmod.update_task_status(
+                        task_id,
+                        "error",
+                        error_message=(
+                            f"Профиль {profile_id} достиг дневного лимита ({uploads_today}/{daily_limit} загрузок). "
+                            "Задача перенесена. Лимит сбрасывается в 00:00 UTC."
+                        ),
+                        error_type="daily_limit",
+                        tenant_id=self.tenant_id,
+                        db_path=self.db_path,
+                    )
+                    return
 
             # 1) AI метаданные — до рендера, чтобы overlay_text использовался как субтитр.
             meta = await ai_copywriter.generate_metadata(self.groq_api_key, self.niche)
@@ -849,6 +894,8 @@ class AutomationPipeline:
                 device_model=device_model_for_render,
                 auto_trim_lead_tail=self.auto_trim_lead_tail,
                 perceptual_hash_check=self.perceptual_hash_check,
+                shorts_loop=self.shorts_loop,
+                shorts_loop_fade_sec=self.shorts_loop_fade_sec,
                 progress_callback=_on_encode_progress,
                 cancel_event=_cancel_ev,
             )
@@ -915,14 +962,15 @@ class AutomationPipeline:
                 await self._fail_task_cancelled(task_id, unique_path)
                 return
 
-            # 3) AdsPower — с мьютексом по профилю (один профиль = один воркер за раз).
+            # 3) Антидетект — с мьютексом по профилю (один профиль = один воркер за раз).
             _profile_lock = self._get_profile_lock(profile_id)
             async with _profile_lock:
-                start = await adspower_sync.start_profile_with_retry(profile_id)
+                from core.antidetect_registry import get_registry as _get_registry
+                start = await _get_registry().start_profile(profile_id, tenant_id=self.tenant_id)
                 if start.get("status") != "ok":
                     await self._fail_or_retry(
                         task_id,
-                        error_message=str(start.get("message", "AdsPower")),
+                        error_message=str(start.get("message", "Antidetect")),
                         error_type="adspower",
                         retry_count=retry_count,
                         unique_path=unique_path,
@@ -1026,9 +1074,15 @@ class AutomationPipeline:
             if self._cleanup_enabled():
                 self._try_delete_file(unique_path)
                 _orig = task.get("original_video")
-                # Удаляем исходник только если он в data/uploads/ (загруженный через UI)
-                if _orig and str(_orig).find("uploads") != -1:
-                    self._try_delete_file(str(_orig))
+                # Удаляем исходник только если он внутри data/uploads/ (загруженный через UI)
+                if _orig:
+                    try:
+                        _orig_path = Path(str(_orig)).resolve()
+                        _uploads_root = (_DEFAULT_DATA / "uploads").resolve()
+                        if _orig_path.is_relative_to(_uploads_root):
+                            self._try_delete_file(str(_orig))
+                    except (ValueError, TypeError):
+                        pass
 
         except Exception as exc:
             logger.exception("task %s: %s", task_id, exc)
@@ -1075,7 +1129,8 @@ class AutomationPipeline:
         if not profile_id:
             return
         try:
-            await adspower_sync.stop_profile(profile_id)
+            from core.antidetect_registry import get_registry as _get_registry
+            await _get_registry().stop_profile(profile_id, tenant_id=self.tenant_id)
         except Exception as exc:
             logger.warning("stop_profile %s: %s", profile_id, exc)
 

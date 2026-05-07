@@ -71,16 +71,21 @@ function ProgressBar({ value, max, color }: { value: number; max: number; color:
   const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
   const isHigh = pct >= 85;
   return (
-    <div style={{ background: "var(--bg-elevated)", borderRadius: 4, height: 6, overflow: "hidden" }}>
-      <div
-        style={{
-          width: `${pct}%`,
-          height: "100%",
-          background: isHigh ? "var(--accent-red)" : color,
-          borderRadius: 4,
-          transition: "width 0.5s ease",
-        }}
-      />
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ flex: 1, background: "var(--bg-elevated)", borderRadius: 4, height: 6, overflow: "hidden" }}>
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: isHigh ? "var(--accent-red)" : color,
+            borderRadius: 4,
+            transition: "width 0.5s ease",
+          }}
+        />
+      </div>
+      <span className="mono" style={{ minWidth: 40, textAlign: "right", fontSize: 11, color: "var(--text-tertiary)" }}>
+        {pct.toFixed(0)}%
+      </span>
     </div>
   );
 }

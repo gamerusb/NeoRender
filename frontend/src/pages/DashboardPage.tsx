@@ -595,24 +595,60 @@ export function DashboardPage() {
             <span>Больше</span>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 9, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)", textAlign: "right", paddingRight: 4 }}>
-            {dayLabels.map((d) => <div key={d}>{d}</div>)}
-          </div>
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 3, maxWidth: 580 }}>
-            {derived.heatClasses.map((row, ri) => (
-              <div key={ri} className="heatmap">
-                {row.map((cls, ci) => <div key={ci} className={`heatmap-cell${cls ? ` ${cls}` : ""}`} />)}
+        <div className="heat-layout">
+          {/* ── Левая панель: хитмап фиксированного размера ── */}
+          <div className="heat-grid-wrap">
+            <div className="heat-day-col">
+              {dayLabels.map((d) => <span key={d}>{d}</span>)}
+            </div>
+            <div className="heat-grid-inner">
+              {derived.heatClasses.map((row, ri) => (
+                <div key={ri} className="heatmap">
+                  {row.map((cls, ci) => <div key={ci} className={`heatmap-cell${cls ? ` ${cls}` : ""}`} />)}
+                </div>
+              ))}
+              <div className="heatmap-axis">
+                {["00","04","08","12","16","20"].map((h) => <span key={h}>{h}:00</span>)}
               </div>
-            ))}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", marginTop: 8, fontSize: 9, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)" }}>
-              <span>03:00</span>
-              <span>08:00</span>
-              <span>12:00</span>
-              <span>15:00</span>
-              <span style={{ textAlign: "right" }}>23:59</span>
             </div>
           </div>
+
+          {/* ── Разделитель ── */}
+          <div className="heat-divider" />
+
+          {/* ── Правая панель: гистограмма активности по часам ── */}
+          {(() => {
+            const classVal: Record<string, number> = { "": 0, l1: 1, l2: 2, l3: 3, l4: 4, l5: 5 };
+            const totals = Array.from({ length: 24 }, (_, h) =>
+              derived.heatClasses.reduce((s, row) => s + (classVal[row[h]] ?? 0), 0)
+            );
+            const mx = Math.max(1, ...totals);
+            const peakH = totals.indexOf(mx);
+            const dayTotals = derived.heatClasses.map((row) => row.reduce((s, c) => s + (classVal[c] ?? 0), 0));
+            const peakDay = dayLabels[dayTotals.indexOf(Math.max(...dayTotals))];
+            return (
+              <div className="heat-peaks-panel">
+                <div className="heat-peaks-title">По часам суток</div>
+                <div className="heat-peaks-bars-wrap">
+                  <div className="heat-peaks-bars">
+                    {totals.map((v, h) => (
+                      <div key={h} className="heat-peak-bar-wrap" title={`${String(h).padStart(2,"0")}:00 — ${v} заливов`}>
+                        <div
+                          className={`heat-peak-bar${h === peakH ? " peak" : ""}`}
+                          style={{ height: `${Math.round((v / mx) * 100)}%` }}
+                        />
+                        {h % 6 === 0 && <span className="heat-peak-label">{String(h).padStart(2,"0")}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="heat-peak-stat">
+                  <span className="heat-peak-badge">⚡ Пик: {String(peakH).padStart(2,"0")}:00–{String(peakH + 1).padStart(2,"0")}:00</span>
+                  <span className="heat-peak-badge">📅 Лучший день: {peakDay}</span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
 

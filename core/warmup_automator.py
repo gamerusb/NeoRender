@@ -31,6 +31,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Максимальное число комментариев за одну сессию (YouTube банит новые аккаунты
+# при >8–10 комментариях в час).
+_MAX_COMMENTS_PER_SESSION = 8
+
 
 # ── Корейские поисковые запросы (ниша — нейтральный/развлекательный контент) ─
 
@@ -248,19 +252,154 @@ async def _bio_pause(page: Any, prob: float = 0.15) -> None:
     await _random_hover(page)
 
 
+# Короткие «отвлечения» — заходим на левый сайт и сразу возвращаемся
+_DISTRACTION_SITES = [
+    "https://www.google.com",
+    "https://www.reddit.com",
+    "https://news.ycombinator.com",
+    "https://www.wikipedia.org",
+    "https://twitter.com",
+]
+
+
+async def _distraction_detour(page: Any, prob: float = 0.12) -> bool:
+    """
+    С вероятностью prob уходим на случайный сторонний сайт на 8–25 секунд,
+    потом возвращаемся на YouTube. Имитирует переключение вкладки / случайный сёрфинг.
+    Возвращает True если детур был выполнен.
+    """
+    if random.random() >= prob:
+        return False
+    url = random.choice(_DISTRACTION_SITES)
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        await _random_hover(page)
+        await asyncio.sleep(random.uniform(8.0, 25.0))
+        await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20_000)
+        await asyncio.sleep(random.uniform(1.5, 3.0))
+        logger.debug("distraction_detour: visited %s, back to YT", url)
+        return True
+    except Exception:
+        try:
+            await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20_000)
+        except Exception:
+            pass
+        return False
+
+
+# ── Markov Chain тайпер ────────────────────────────────────────────────────────
+#
+# Модель основана на реальной статистике межклавишных задержек:
+#   - Частые биграммы (th, he, in, er…) печатаются быстро: 60–120 мс
+#   - Смена рук быстрее одноручных переходов (эффект QWERTY)
+#   - Burst-ритм: серия быстрых символов, затем микропауза
+#   - ~4% опечаток с исправлением (backspace + правильный символ)
+#   - Пауза после пробела — «слово закончено»
+
+# Левая/правая рука на QWERTY
+_LEFT_KEYS  = set("qwertasdfgzxcvb1234567")
+_RIGHT_KEYS = set("yuiophjklnm8901-=[];',./?")
+
+# Очень частые биграммы в английском — быстрый переход
+_FAST_BIGRAMS: frozenset[str] = frozenset({
+    "th", "he", "in", "er", "an", "re", "on", "en", "at", "es",
+    "or", "te", "of", "ed", "is", "it", "al", "ar", "st", "to",
+    "nt", "ng", "se", "ha", "as", "ou", "io", "le", "ve", "co",
+    "me", "de", "hi", "ri", "ro", "ic", "ne", "ea", "ra", "ce",
+    "li", "ch", "ll", "be", "ma", "si", "om", "ur", "ca", "el",
+    "ta", "la", "na", "il", "di", "fo", "ho", "pe", "ec", "pr",
+    "ac", "ge", "nd", "ti", "no", "ns", "ss", "pa", "ct", "us",
+    "po", "tr", "we", "lo", "un", "ht", "fe", "ly", "ut", "ow",
+})
+
+# Частые опечатки: символ → что набирают вместо него (соседние клавиши)
+_TYPO_NEIGHBORS: dict[str, list[str]] = {
+    "a": ["s", "q", "w"], "b": ["v", "n", "g"], "c": ["x", "v", "d"],
+    "d": ["s", "f", "e"], "e": ["w", "r", "d"], "f": ["d", "g", "r"],
+    "g": ["f", "h", "t"], "h": ["g", "j", "y"], "i": ["u", "o", "k"],
+    "j": ["h", "k", "n"], "k": ["j", "l", "i"], "l": ["k", ";", "o"],
+    "m": ["n", ",", "j"], "n": ["b", "m", "h"], "o": ["i", "p", "l"],
+    "p": ["o", "[", "l"], "q": ["w", "a"],      "r": ["e", "t", "f"],
+    "s": ["a", "d", "w"], "t": ["r", "y", "g"], "u": ["y", "i", "h"],
+    "v": ["c", "b", "f"], "w": ["q", "e", "s"], "x": ["z", "c", "s"],
+    "y": ["t", "u", "h"], "z": ["a", "x"],
+}
+
+
+def _bigram_delay_ms(prev: str, curr: str) -> int:
+    """
+    Возвращает задержку в мс перед нажатием curr (после prev).
+    Логика: биграммная частота → смена рук → burst-состояние.
+    """
+    bigram = (prev + curr).lower()
+
+    # Пробел — граница слова, небольшая пауза
+    if curr == " ":
+        return random.randint(90, 180)
+    if prev == " ":
+        return random.randint(70, 140)
+
+    # Частая биграмма → быстрый переход
+    if bigram in _FAST_BIGRAMS:
+        base = random.randint(55, 110)
+    else:
+        base = random.randint(90, 190)
+
+    # Смена рук быстрее (alternation advantage)
+    prev_left = prev.lower() in _LEFT_KEYS
+    curr_left = curr.lower() in _LEFT_KEYS
+    if prev_left != curr_left:
+        base = int(base * 0.85)
+
+    # Случайный burst: иногда символ летит почти мгновенно
+    if random.random() < 0.08:
+        base = random.randint(30, 55)
+
+    # Редкая микропауза (задумался)
+    if random.random() < 0.04:
+        base += random.randint(200, 600)
+
+    return base
+
+
 async def _human_type(locator: Any, text: str) -> None:
-    """Посимвольный ввод с нерегулярными задержками (как реальная печать)."""
+    """
+    Посимвольный ввод с Markov Chain межклавишными задержками.
+
+    Особенности:
+      - Задержка между символами зависит от биграммы (частые пары быстрее)
+      - Смена рук на QWERTY даёт acceleration advantage
+      - ~4% опечаток: вводится неверный символ, затем Backspace + правильный
+      - Burst-ритм: серии быстрых символов + редкие микропаузы
+    """
     try:
         await locator.click(timeout=10_000)
         await locator.press("Control+a")
         await locator.press("Backspace")
-        # Неравномерные задержки: иногда «замешкался», иногда быстро.
+
+        prev = " "  # считаем начало строки как после пробела
         for char in text:
-            delay_ms = random.choices(
-                [random.randint(40, 80), random.randint(80, 160), random.randint(160, 320)],
-                weights=[60, 30, 10],
-            )[0]
-            await locator.type(char, delay=delay_ms)
+            delay_ms = _bigram_delay_ms(prev, char)
+
+            # Опечатка ~4% (только для строчных букв)
+            if char.lower() in _TYPO_NEIGHBORS and random.random() < 0.04:
+                typo = random.choice(_TYPO_NEIGHBORS[char.lower()])
+                if char.isupper():
+                    typo = typo.upper()
+                # Набираем опечатку
+                await locator.type(typo, delay=delay_ms)
+                # Пауза — «заметил»
+                await asyncio.sleep(random.uniform(0.08, 0.25))
+                # Backspace
+                await locator.press("Backspace")
+                await asyncio.sleep(random.uniform(0.04, 0.12))
+                # Правильный символ
+                await locator.type(char, delay=random.randint(60, 130))
+            else:
+                await locator.type(char, delay=delay_ms)
+
+            prev = char
+
     except Exception as exc:
         logger.debug("_human_type fallback: %s", exc)
         try:
@@ -683,28 +822,83 @@ async def _search_and_watch(
         return _error(str(exc))
 
 
+def _shorts_watch_seconds(retention_profile: str) -> tuple[float, int]:
+    """
+    Возвращает (watch_sec, n_loops) для одного Short на основе профиля retention.
+
+    Профили:
+      looper   — смотрит 2–4 петли (YouTube Shorts авто-реплей). Самый
+                 ценный сигнал для алгоритма: каждый реплей = отдельный
+                 взвешенный просмотр. Цель: replica rate >10%.
+      engaged  — смотрит 80–100% длины, высокая вероятность лайка.
+      casual   — смотрит 35–70%, нейтральный сигнал.
+      bouncer  — 2–8 сек и уходит. Нужен для натуральности — не все
+                 зрители качественные.
+      mixed    — случайно выбирает из всех профилей с весами.
+
+    Типичная длина Short: 15–55 сек.
+    """
+    typical_dur = random.uniform(15.0, 55.0)
+    if retention_profile == "looper":
+        n = random.randint(2, 4)
+        return typical_dur * n * random.uniform(0.90, 1.05), n
+    if retention_profile == "engaged":
+        return typical_dur * random.uniform(0.80, 1.00), 1
+    if retention_profile == "casual":
+        return typical_dur * random.uniform(0.35, 0.70), 1
+    if retention_profile == "bouncer":
+        return random.uniform(2.0, 8.0), 1
+    # mixed: looper 20%, engaged 35%, casual 35%, bouncer 10%
+    r = random.random()
+    if r < 0.20:
+        return _shorts_watch_seconds("looper")
+    if r < 0.55:
+        return _shorts_watch_seconds("engaged")
+    if r < 0.90:
+        return _shorts_watch_seconds("casual")
+    return _shorts_watch_seconds("bouncer")
+
+
 async def _watch_shorts_feed(
     page: Any,
     count: int,
     like_prob: float,
     comment_prob: float,
     comment_pool: list[str],
+    retention_mode: str = "mixed",
 ) -> dict[str, Any]:
     """
-    Shorts-лента: пролистать N роликов. Иногда лайк или комментарий.
-    Возвращает статистику: watched, liked, commented.
+    Shorts-лента: пролистать N роликов с retention-профилями.
+
+    retention_mode:
+      mixed   — реалистичная смесь: looper/engaged/casual/bouncer (рекомендуется)
+      looper  — все ролики смотрятся в петле 2–4 раза (max сигнал для алгоритма)
+      engaged — полные просмотры + высокая вероятность лайка
+      casual  — частичные просмотры, нейтрально
+      bouncer — быстрые выходы (не использовать как единственный режим)
+
+    Возвращает статистику: watched, liked, commented, loops.
     """
-    watched = liked = commented = 0
+    watched = liked = commented = total_loops = 0
     try:
         await page.goto("https://www.youtube.com/shorts", wait_until="domcontentloaded", timeout=60_000)
         await _pause(2.0, 4.0)
 
         for _ in range(count):
-            sec = random.uniform(4.0, 18.0)
-            await asyncio.sleep(sec)
+            watch_sec, n_loops = _shorts_watch_seconds(retention_mode)
+            total_loops += n_loops
 
-            # Лайк.
-            if random.random() < like_prob:
+            # Ждём время просмотра (включая петли — YouTube не требует действий для реплея)
+            await asyncio.sleep(max(2.0, watch_sec))
+
+            # Лайк: engaged и looper лайкают чаще.
+            effective_like_prob = like_prob
+            if retention_mode == "looper" or n_loops >= 2:
+                effective_like_prob = min(1.0, like_prob * 1.8)
+            elif retention_mode == "bouncer":
+                effective_like_prob = like_prob * 0.2
+
+            if random.random() < effective_like_prob:
                 try:
                     btn = page.locator(
                         'button[aria-label*="like" i]:not([aria-label*="dislike" i])'
@@ -744,7 +938,7 @@ async def _watch_shorts_feed(
                 except Exception:
                     pass
 
-            # Следующий Short.
+            # Следующий Short (bouncer иногда свайпает раньше через клавишу).
             try:
                 nxt = page.locator(
                     'button[aria-label*="Next" i], button[aria-label*="Следующ" i],'
@@ -763,7 +957,7 @@ async def _watch_shorts_feed(
     except Exception as exc:
         logger.debug("watch_shorts_feed: %s", exc)
 
-    return {"watched": watched, "liked": liked, "commented": commented}
+    return {"watched": watched, "liked": liked, "commented": commented, "loops": total_loops}
 
 
 async def _browse_subscriptions(page: Any, scroll_steps: tuple[int, int]) -> None:
@@ -809,6 +1003,38 @@ async def _browse_history(page: Any) -> None:
         logger.debug("browse_history: %s", exc)
 
 
+async def _check_yt_logged_in(page: Any) -> bool:
+    """
+    Быстрая проверка: залогинен ли аккаунт на YouTube.
+
+    Ищет аватар (#avatar-btn) или иконку аккаунта yt-icon-button[aria-label].
+    Таймаут 10 с — не блокирует сессию при медленном интернете.
+    Возвращает True если аккаунт авторизован.
+    """
+    try:
+        await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=30_000)
+        await _pause(1.5, 3.0)
+        selectors = [
+            "#avatar-btn",
+            "button#avatar-btn",
+            "yt-img-shadow#avatar img",
+            "#masthead-avatar",
+        ]
+        for sel in selectors:
+            try:
+                el = page.locator(sel).first
+                if await el.count() > 0 and await el.is_visible(timeout=8_000):
+                    logger.debug("_check_yt_logged_in: logged in (selector=%s)", sel)
+                    return True
+            except Exception:
+                continue
+        logger.warning("_check_yt_logged_in: аккаунт НЕ авторизован или YouTube изменил разметку")
+        return False
+    except Exception as exc:
+        logger.warning("_check_yt_logged_in: %s", exc)
+        return False
+
+
 # ── Точка входа ──────────────────────────────────────────────────────────────
 
 async def run_warmup_session(
@@ -818,18 +1044,24 @@ async def run_warmup_session(
     niche_keywords: list[str] | None = None,
     tenant_id: str | None = None,
     enable_prewarm: bool = True,
+    cancel_event: asyncio.Event | None = None,
+    shorts_retention_mode: str = "mixed",
 ) -> dict[str, Any]:
     """
     Полная сессия прогрева для профиля AdsPower.
 
     Параметры
     ---------
-    ws_endpoint     : CDP websocket (из adspower_sync.start_profile)
-    profile_id      : ID профиля AdsPower (для логов и результата)
-    intensity       : "light" | "medium" | "deep"
-    niche_keywords  : ключевые слова ниши (смешиваются с корейскими и общими)
-    tenant_id       : передаётся в результат (не используется внутри)
-    enable_prewarm  : выполнять cookie pre-warm (Google → YouTube гость → YT Music)
+    ws_endpoint            : CDP websocket (из adspower_sync.start_profile)
+    profile_id             : ID профиля AdsPower (для логов и результата)
+    intensity              : "light" | "medium" | "deep"
+    niche_keywords         : ключевые слова ниши (смешиваются с корейскими и общими)
+    tenant_id              : передаётся в результат (не используется внутри)
+    enable_prewarm         : выполнять cookie pre-warm (Google → YouTube гость → YT Music)
+    cancel_event           : asyncio.Event — установить для прерывания сессии
+    shorts_retention_mode  : профиль просмотра Shorts — "mixed" | "looper" | "engaged" |
+                             "casual" | "bouncer". "looper" максимизирует реплей-сигнал
+                             для алгоритма YouTube Shorts.
 
     Возвращает
     ----------
@@ -889,20 +1121,59 @@ async def run_warmup_session(
         page = context.pages[0] if context.pages else await context.new_page()
         page.set_default_timeout(60_000)
 
-        # 0. Cookie pre-warm.
+        # ── Fingerprint spoof (инжектируется до первого goto) ─────────────────
+        try:
+            from .fingerprint_spoofer import apply_fingerprint_spoof  # type: ignore
+        except ImportError:
+            from core.fingerprint_spoofer import apply_fingerprint_spoof  # type: ignore
+        fp_res = await apply_fingerprint_spoof(context=context)
+        if fp_res.get("status") == "ok":
+            actions_log.append(f"fp_spoof:seed={fp_res['seed']}")
+            logger.debug("warmup %s: fingerprint spoof applied seed=%s", profile_id, fp_res["seed"])
+        else:
+            logger.debug("warmup %s: fp spoof failed: %s", profile_id, fp_res.get("message"))
+
+        # Playwright-stealth (если установлен — снижает WebDriver-детектирование)
+        try:
+            from playwright_stealth import stealth_async  # type: ignore
+            await stealth_async(page)
+            actions_log.append("stealth_applied")
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.debug("warmup stealth failed for %s: %s", profile_id, exc)
+
+        def _cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        # 0. Проверка авторизации.
+        actions_log.append("check_login")
+        logged_in = await _check_yt_logged_in(page)
+        stats["logged_in"] = logged_in
+        if not logged_in:
+            actions_log.append("login:not_detected")
+            logger.warning("warmup %s: аккаунт не залогинен — прогрев продолжится, но эффект минимален", profile_id)
+
+        if _cancelled():
+            return _error("Отменено пользователем", error_type="cancelled")
+
+        # 1. Cookie pre-warm (теперь WARNING, не фатальная ошибка).
         if enable_prewarm:
             actions_log.append("cookie_prewarm")
             ok = await _cookie_prewarm(page)
             stats["prewarm_done"] = bool(ok)
             if not ok:
-                return _error(
-                    "Cookie pre-warm завершился с ошибкой.",
-                    error_type="prewarm_failed",
-                    failed_step="cookie_prewarm",
-                )
+                actions_log.append("prewarm_failed:warning")
+                logger.warning("warmup %s: cookie pre-warm не удался — продолжаем без него", profile_id)
             await _pause(2.0, 4.0)
 
-        # 1. Главная YouTube.
+        if _cancelled():
+            return _error("Отменено пользователем", error_type="cancelled")
+
+        # Счётчик комментариев для сессии
+        _session_comments = 0
+
+        # 2. Главная YouTube.
         actions_log.append("browse_homepage")
         if not await _browse_homepage(page, cfg["scroll_steps"]):
             return _error(
@@ -913,19 +1184,31 @@ async def run_warmup_session(
         await _bio_pause(page, cfg["bio_pause_prob"])
         await _pause(1.5, 3.0)
 
-        # 2. Поиск + просмотр видео.
+        if _cancelled():
+            return _error("Отменено пользователем", error_type="cancelled")
+
+        # 3. Поиск + просмотр видео.
         used_kw: set[str] = set()
         for _ in range(n_searches):
+            if _cancelled():
+                break
+            # Стохастический пропуск: 12% шанс пропустить итерацию поиска
+            if random.random() < 0.12:
+                actions_log.append("search_skipped:stochastic")
+                await _pause(1.0, 2.5)
+                continue
             kw = next((k for k in keywords if k not in used_kw), random.choice(keywords))
             used_kw.add(kw)
             actions_log.append(f"search:{kw}")
+            # Передаём актуальный comment_prob с учётом лимита сессии
+            eff_comment_prob = cfg["comment_prob"] if _session_comments < _MAX_COMMENTS_PER_SESSION else 0.0
             res = await _search_and_watch(
                 page,
                 query=kw,
                 watch_sec=cfg["pause_range"],
                 like_prob=cfg["like_prob"],
                 sub_prob=cfg["sub_prob"],
-                comment_prob=cfg["comment_prob"],
+                comment_prob=eff_comment_prob,
                 channel_prob=cfg["channel_prob"],
                 comment_pool=comment_pool,
                 scroll_steps=cfg["scroll_steps"],
@@ -939,33 +1222,52 @@ async def run_warmup_session(
                     stats["subscriptions"]    += 1
                 if res.get("commented"):
                     stats["comments_left"]    += 1
+                    _session_comments         += 1
                 if res.get("visited_channel"):
                     stats["channels_visited"] += 1
             else:
                 actions_log.append(f"search_failed:{kw}")
             await _bio_pause(page, cfg["bio_pause_prob"])
+            # Случайное отвлечение между поисками
+            if await _distraction_detour(page, prob=0.12):
+                actions_log.append("distraction_detour")
             await _pause(2.0, 6.0)
 
-        # 3. Shorts-лента.
+        if _cancelled():
+            return _error("Отменено пользователем", error_type="cancelled")
+
+        # 4. Shorts-лента.
         actions_log.append(f"shorts_feed:{n_shorts}")
+        eff_comment_prob_shorts = cfg["comment_prob"] if _session_comments < _MAX_COMMENTS_PER_SESSION else 0.0
         shorts_stats = await _watch_shorts_feed(
             page, n_shorts,
             like_prob=cfg["like_prob"],
-            comment_prob=cfg["comment_prob"],
+            comment_prob=eff_comment_prob_shorts,
             comment_pool=comment_pool,
+            retention_mode=shorts_retention_mode,
         )
         stats["shorts_watched"]   = shorts_stats["watched"]
         stats["shorts_liked"]     = shorts_stats["liked"]
         stats["shorts_commented"] = shorts_stats["commented"]
+        stats["shorts_loops"]     = shorts_stats.get("loops", 0)
+        _session_comments += shorts_stats["commented"]
         await _bio_pause(page, cfg["bio_pause_prob"])
+        # Случайное отвлечение после Shorts
+        if await _distraction_detour(page, prob=0.15):
+            actions_log.append("distraction_detour")
         await _pause(1.5, 4.0)
 
-        # 4. Дополнительные видео с главной страницы.
+        if _cancelled():
+            return _error("Отменено пользователем", error_type="cancelled")
+
+        # 5. Дополнительные видео с главной страницы.
         remaining = n_videos - stats["videos_watched"]
         if remaining > 0:
             if not await _browse_homepage(page, cfg["scroll_steps"]):
                 actions_log.append("homepage_followup_failed")
             for _ in range(remaining):
+                if _cancelled():
+                    break
                 try:
                     items = page.locator('a#video-title[href*="/watch"]')
                     cnt = await items.count()
@@ -996,15 +1298,20 @@ async def run_warmup_session(
                                     stats["likes_given"] += 1
                             except Exception:
                                 pass
-                        # Комментарий.
-                        if await _leave_comment(page, comment_pool, cfg["comment_prob"]):
-                            stats["comments_left"] += 1
+                        # Комментарий (с учётом лимита).
+                        if _session_comments < _MAX_COMMENTS_PER_SESSION:
+                            if await _leave_comment(page, comment_pool, cfg["comment_prob"]):
+                                stats["comments_left"] += 1
+                                _session_comments += 1
                         await page.go_back()
                         await _pause(1.0, 3.0)
                 except Exception:
                     pass
 
-        # 5. Подписки, Тренды, История (medium / deep).
+        if _cancelled():
+            return _error("Отменено пользователем", error_type="cancelled")
+
+        # 6. Подписки, Тренды, История (medium / deep).
         if lvl in ("medium", "deep"):
             if random.random() < 0.5:
                 actions_log.append("browse_subscriptions")
@@ -1019,7 +1326,7 @@ async def run_warmup_session(
                 await _browse_history(page)
                 await _pause(1.0, 2.5)
 
-        # 6. Финальный возврат на главную.
+        # 7. Финальный возврат на главную.
         try:
             await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=30_000)
             await _pause(1.0, 2.5)
@@ -1068,31 +1375,81 @@ async def run_warmup_for_profile(
     niche_keywords: list[str] | None = None,
     tenant_id: str | None = None,
     enable_prewarm: bool = True,
+    cancel_event: asyncio.Event | None = None,
+    shorts_retention_mode: str = "mixed",
 ) -> dict[str, Any]:
     """
     Высокоуровневая обёртка: start_profile → warmup → stop_profile.
+    Сохраняет запись сессии в warmup_sessions.
     Использовать из API или планировщика.
     """
+    import core.database as dbmod
+
+    tid = tenant_id or "default"
     from core.antidetect_registry import get_registry
     registry = get_registry()
 
-    start_res = await registry.start_profile(profile_id, tenant_id=tenant_id or "default")
+    start_res = await registry.start_profile(profile_id, tenant_id=tid)
     if start_res.get("status") != "ok":
         return start_res
 
     ws = start_res.get("ws_endpoint", "")
     if not ws:
-        await registry.stop_profile(profile_id, tenant_id=tenant_id or "default")
+        await registry.stop_profile(profile_id, tenant_id=tid)
         return _error("Антидетект-браузер не вернул ws_endpoint.")
 
+    # Создаём запись сессии перед стартом.
+    db_res = await dbmod.create_warmup_session(
+        profile_id=profile_id,
+        intensity=intensity,
+        platform="youtube",
+        tenant_id=tid,
+    )
+    session_id: int | None = db_res.get("session_id") if db_res.get("status") == "ok" else None
+
+    result: dict[str, Any] = {}
     try:
-        return await run_warmup_session(
+        result = await run_warmup_session(
             ws_endpoint=ws,
             profile_id=profile_id,
             intensity=intensity,
             niche_keywords=niche_keywords,
             tenant_id=tenant_id,
             enable_prewarm=enable_prewarm,
+            cancel_event=cancel_event,
+            shorts_retention_mode=shorts_retention_mode,
         )
+        return result
+    except Exception as exc:
+        logger.exception("run_warmup_for_profile: %s", exc)
+        result = _error(str(exc))
+        return result
     finally:
-        await registry.stop_profile(profile_id, tenant_id=tenant_id or "default")
+        await registry.stop_profile(profile_id, tenant_id=tid)
+
+        # Сохраняем итог в БД.
+        if session_id is not None:
+            cancelled = cancel_event is not None and cancel_event.is_set()
+            success = result.get("status") == "ok" and not cancelled
+            final_status = "cancelled" if cancelled else ("success" if success else "error")
+
+            await dbmod.finish_warmup_session(
+                session_id=session_id,
+                status=final_status,
+                stats=result.get("stats"),
+                actions_log=result.get("actions_log"),
+                error_message=result.get("message") if not success else None,
+                logged_in=bool((result.get("stats") or {}).get("logged_in")),
+                tenant_id=tid,
+            )
+
+            # После успешного прогрева переводим профиль в статус "ready".
+            if success:
+                try:
+                    await dbmod.update_adspower_profile_status(
+                        adspower_profile_id=profile_id,
+                        new_status="ready",
+                        tenant_id=tid,
+                    )
+                except Exception as exc:
+                    logger.warning("run_warmup_for_profile: не удалось обновить статус профиля: %s", exc)

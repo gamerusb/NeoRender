@@ -4,6 +4,7 @@ import { useTenant } from "@/tenant/TenantContext";
 import { EmptyState } from "@/components/EmptyState";
 import { SkeletonStatGrid, SkeletonTable } from "@/components/Skeleton";
 import { AreaChart, BarChart3, TrendingUp, Upload, Users, Zap } from "lucide-react";
+import "./admin.css";
 
 type DashSummary = {
   total_tasks?: number;
@@ -108,14 +109,14 @@ export function AdminStatsPage() {
   ];
 
   return (
-    <div className="page-root">
+    <div className="page-root admin-shell">
       <div className="page-header">
         <div className="page-header-text">
           <h1 className="page-title">
             <BarChart3 size={20} color="var(--accent-cyan)" />
             Общая статистика платформы
           </h1>
-          <p className="page-subtitle">Данные тенанта: <b>{tenantId}</b></p>
+          <p className="page-subtitle">Данные тенанта: <span className="admin-badge-soft">{tenantId}</span></p>
         </div>
       </div>
 

@@ -13,6 +13,7 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
+import "./admin.css";
 
 type WorkerHealth = {
   pipeline_running?: boolean;
@@ -90,7 +91,7 @@ export function AdminSystemPage() {
   const isLoading = healthQ.isLoading || statusQ.isLoading;
 
   return (
-    <div className="page-root" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="page-root admin-shell" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="page-header">
         <div className="page-header-text">
           <h1 className="page-title">
@@ -141,7 +142,7 @@ export function AdminSystemPage() {
           <div style={s.resourceItem}>
             <div style={s.resourceTop}>
               <span>CPU</span>
-              <span style={s.pctLabel}>{cpuUsed.toFixed(1)}%</span>
+              <span style={s.pctLabel}>{cpuUsed.toFixed(0)}%</span>
             </div>
             <GaugeBar pct={cpuUsed} color="var(--accent-cyan)" />
           </div>

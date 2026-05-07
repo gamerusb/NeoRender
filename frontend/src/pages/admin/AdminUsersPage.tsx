@@ -15,6 +15,7 @@ import {
   UserCheck,
   Users,
 } from "lucide-react";
+import "./admin.css";
 
 type MockUser = {
   id: number;
@@ -28,6 +29,16 @@ type MockUser = {
   profiles_used?: number;
   created_at: string;
   updated_at?: string;
+};
+
+type AuditEvent = {
+  id: number;
+  admin_email?: string;
+  target_email?: string;
+  action: string;
+  old_value?: string;
+  new_value?: string;
+  created_at?: string;
 };
 
 function normalizeAdminUser(raw: unknown): MockUser {
@@ -91,6 +102,9 @@ export function AdminUsersPage() {
   const [search, setSearch] = useState("");
   const [planFilter, setPlanFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [bulkAction, setBulkAction] = useState<"ban" | "unban" | "plan" | "role">("ban");
+  const [bulkValue, setBulkValue] = useState("pro");
 
   const usersQ = useQuery({
     queryKey: ["admin-users"],
@@ -101,6 +115,16 @@ export function AdminUsersPage() {
       return { users: list.map(normalizeAdminUser) };
     },
     staleTime: 15_000,
+  });
+  const auditQ = useQuery({
+    queryKey: ["admin-users-audit"],
+    queryFn: async () => {
+      const data = await apiFetch<{ events?: unknown }>("/api/admin/users/audit?limit=40");
+      const raw = data.events;
+      const list = Array.isArray(raw) ? raw : [];
+      return { events: list as AuditEvent[] };
+    },
+    staleTime: 10_000,
   });
 
   const banMut = useMutation({
@@ -118,11 +142,33 @@ export function AdminUsersPage() {
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["admin-users"] }),
   });
 
+  const roleMut = useMutation({
+    mutationFn: ({ id, role }: { id: number; role: MockUser["role"] }) =>
+      apiFetch(`/api/admin/users/${id}/role`, {
+        method: "POST",
+        body: JSON.stringify({ role }),
+      }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["admin-users"] }),
+  });
+  const bulkMut = useMutation({
+    mutationFn: (payload: { user_ids: number[]; action: string; value?: string }) =>
+      apiFetch<{ changed?: number; skipped?: number }>("/api/admin/users/bulk", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: async () => {
+      setSelectedIds([]);
+      await qc.invalidateQueries({ queryKey: ["admin-users"] });
+      await qc.invalidateQueries({ queryKey: ["admin-users-audit"] });
+    },
+  });
+
   const users = usersQ.data?.users ?? [];
+  const auditEvents = auditQ.data?.events ?? [];
 
   if (usersQ.isError) {
     return (
-      <div className="page-root">
+      <div className="page-root admin-shell">
         <div className="page-header">
           <div className="page-header-text">
             <h1 className="page-title">
@@ -160,12 +206,41 @@ export function AdminUsersPage() {
     planMut.mutate({ id, plan });
   }
 
+  function changeRole(id: number, role: MockUser["role"]) {
+    roleMut.mutate({ id, role });
+  }
+
+  function toggleSelectUser(id: number) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  function toggleSelectAllFiltered(nextChecked: boolean) {
+    if (nextChecked) {
+      setSelectedIds(Array.from(new Set([...selectedIds, ...filtered.map((u) => u.id)])));
+      return;
+    }
+    const removeSet = new Set(filtered.map((u) => u.id));
+    setSelectedIds(selectedIds.filter((id) => !removeSet.has(id)));
+  }
+
+  function runBulkAction() {
+    if (selectedIds.length === 0) return;
+    const payload: { user_ids: number[]; action: string; value?: string } = {
+      user_ids: selectedIds,
+      action: bulkAction,
+    };
+    if (bulkAction === "plan" || bulkAction === "role") {
+      payload.value = bulkValue;
+    }
+    bulkMut.mutate(payload);
+  }
+
   const totalActive = users.filter((u) => u.status === "active").length;
   const totalBanned = users.filter((u) => u.status === "banned").length;
   const totalTasks = users.reduce((a, u) => a + (u.tasks_total ?? 0), 0);
 
   return (
-    <div className="page-root">
+    <div className="page-root admin-shell">
       <div className="page-header">
         <div className="page-header-text">
           <h1 className="page-title">
@@ -245,6 +320,36 @@ export function AdminUsersPage() {
         </span>
       </div>
 
+      <div className="admin-toolbar" style={{ opacity: selectedIds.length > 0 ? 1 : 0.75 }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>Выбрано: {selectedIds.length}</span>
+        <select className="form-input" style={{ maxWidth: 160 }} value={bulkAction} onChange={(e) => setBulkAction(e.target.value as "ban" | "unban" | "plan" | "role")}>
+          <option value="ban">Ban</option>
+          <option value="unban">Unban</option>
+          <option value="plan">Set plan</option>
+          <option value="role">Set role</option>
+        </select>
+        {(bulkAction === "plan" || bulkAction === "role") && (
+          <select className="form-input" style={{ maxWidth: 160 }} value={bulkValue} onChange={(e) => setBulkValue(e.target.value)}>
+            {bulkAction === "plan" ? (
+              <>
+                <option value="free">free</option>
+                <option value="starter">starter</option>
+                <option value="pro">pro</option>
+                <option value="enterprise">enterprise</option>
+              </>
+            ) : (
+              <>
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+              </>
+            )}
+          </select>
+        )}
+        <button type="button" className="btn btn-sm" disabled={selectedIds.length === 0 || bulkMut.isPending} onClick={runBulkAction}>
+          {bulkMut.isPending ? "Применение..." : "Применить к выбранным"}
+        </button>
+      </div>
+
       {/* Table */}
       <div className="card card-elevated" style={{ overflow: "hidden" }}>
         {usersQ.isLoading ? (
@@ -255,6 +360,14 @@ export function AdminUsersPage() {
           <table className="data-table">
             <thead>
               <tr>
+                <th>
+                  <input
+                    type="checkbox"
+                    checked={filtered.length > 0 && filtered.every((u) => selectedIds.includes(u.id))}
+                    onChange={(e) => toggleSelectAllFiltered(e.target.checked)}
+                    aria-label="Выбрать всех"
+                  />
+                </th>
                 {["ID", "Пользователь", "Роль", "Тариф", "Статус", "Задач", "Профилей", "Последний вход", "Действия"].map((h) => (
                   <th key={h}>{h}</th>
                 ))}
@@ -266,6 +379,14 @@ export function AdminUsersPage() {
                 const status = STATUS_COLOR[user.status] ?? STATUS_COLOR.active;
                 return (
                   <tr key={`${user.id}-${user.email}`}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(user.id)}
+                        onChange={() => toggleSelectUser(user.id)}
+                        aria-label={`Выбрать ${user.email}`}
+                      />
+                    </td>
                     <td className="mono" style={{ color: "var(--text-disabled)", fontSize: 11 }}>#{user.id}</td>
                     <td>
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -279,14 +400,27 @@ export function AdminUsersPage() {
                       </div>
                     </td>
                     <td>
-                      {user.role === "admin" ? (
-                        <span className="badge badge-error">
-                          <Shield size={10} />
-                          admin
-                        </span>
-                      ) : (
-                        <span className="badge badge-neutral">user</span>
-                      )}
+                      <select
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          fontFamily: "var(--font-mono)",
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          outline: "none",
+                          padding: "2px 4px",
+                          color: user.role === "admin" ? "var(--accent-red)" : "var(--text-secondary)",
+                          opacity: roleMut.isPending ? 0.6 : 1,
+                        }}
+                        value={user.role}
+                        onChange={(e) => void changeRole(user.id, e.target.value as MockUser["role"])}
+                        disabled={roleMut.isPending}
+                        title="Изменить роль"
+                      >
+                        <option value="user">user</option>
+                        <option value="admin">admin</option>
+                      </select>
                     </td>
                     <td>
                       <select
@@ -332,6 +466,48 @@ export function AdminUsersPage() {
             </tbody>
           </table>
         )}
+      </div>
+
+      <div className="card card-elevated" style={{ overflow: "hidden", marginTop: 12 }}>
+        <div className="card-header">
+          <span className="card-title">Audit log (последние изменения)</span>
+        </div>
+        <div className="card-body-flush">
+          {auditQ.isLoading ? (
+            <div className="empty-state">Загрузка...</div>
+          ) : auditEvents.length === 0 ? (
+            <EmptyState title="Событий пока нет" body="Изменения ролей, тарифов и статусов появятся здесь" />
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Когда</th>
+                  <th>Админ</th>
+                  <th>Пользователь</th>
+                  <th>Действие</th>
+                  <th>Из</th>
+                  <th>В</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auditEvents.map((ev) => (
+                  <tr key={ev.id}>
+                    <td className="mono" style={{ color: "var(--text-disabled)", fontSize: 11 }}>#{ev.id}</td>
+                    <td style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+                      {ev.created_at ? new Date(ev.created_at).toLocaleString("ru-RU") : "—"}
+                    </td>
+                    <td className="mono" style={{ fontSize: 11 }}>{ev.admin_email || "—"}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>{ev.target_email || "—"}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>{ev.action || "—"}</td>
+                    <td className="mono" style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{ev.old_value || "—"}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>{ev.new_value || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
     </div>
   );

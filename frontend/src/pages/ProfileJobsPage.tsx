@@ -106,7 +106,15 @@ export function ProfileJobsPage() {
 
   return (
     <section className="page">
-      {toast && <div className={`toast show ${toast.kind === "ok" ? "ok" : "err"}`}>{toast.msg}</div>}
+      {toast && (
+        <div className="toast-container">
+          <div className={`toast-v2 ${toast.kind === "err" ? "error" : "success"}`}>
+            <span className="toast-v2-icon">{toast.kind === "err" ? "✕" : "✓"}</span>
+            <span className="toast-v2-msg">{toast.msg}</span>
+            <button type="button" className="toast-v2-close" onClick={() => setToast(null)} aria-label="Закрыть">✕</button>
+          </div>
+        </div>
+      )}
       <div className="two-col">
         <div className="card">
           <div className="card-header">

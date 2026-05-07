@@ -1,9 +1,13 @@
+"""
+Launcher обёртка — маршрутизирует запуск/остановку профилей
+через AntidetectRegistry вместо прямого вызова adspower_sync.
+
+Интерфейс не изменился: все импортирующие модули продолжают работать.
+"""
 from __future__ import annotations
 
 import logging
 from typing import Any
-
-from core import adspower_sync
 
 logger = logging.getLogger(__name__)
 
@@ -16,19 +20,21 @@ def _error(message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _ok(message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
-    out: dict[str, Any] = {"status": "ok", "message": message, "data": data or {}}
-    return out
+    return {"status": "ok", "message": message, "data": data or {}}
 
 
-async def start_profile(profile_id: str) -> dict[str, Any]:
+async def start_profile(profile_id: str, tenant_id: str = "default") -> dict[str, Any]:
+    """Запустить профиль через реестр (любой тип антидетекта)."""
     if not str(profile_id or "").strip():
-        return _error("Не указан профиль AdsPower.")
+        return _error("Не указан profile_id.")
     try:
-        res = await adspower_sync.start_profile_with_retry(str(profile_id).strip())
+        from core.antidetect_registry import get_registry
+        registry = get_registry()
+        res = await registry.start_profile(str(profile_id).strip(), tenant_id=tenant_id)
         if res.get("status") != "ok":
-            return _error(str(res.get("message") or "Не удалось запустить профиль AdsPower."), dict(res))
+            return _error(str(res.get("message") or "Не удалось запустить профиль."), dict(res))
         return _ok(
-            "Профиль AdsPower запущен.",
+            "Профиль запущен.",
             {
                 "profile_id": str(profile_id).strip(),
                 "ws_endpoint": str(res.get("ws_endpoint") or ""),
@@ -36,43 +42,44 @@ async def start_profile(profile_id: str) -> dict[str, Any]:
             },
         )
     except Exception as exc:
-        logger.exception("adspower_launcher.start_profile: %s", exc)
-        return _error("Ошибка запуска профиля AdsPower.")
+        logger.exception("launcher.start_profile %s: %s", profile_id, exc)
+        return _error("Ошибка запуска профиля.")
 
 
-async def stop_profile(profile_id: str) -> dict[str, Any]:
+async def stop_profile(profile_id: str, tenant_id: str = "default") -> dict[str, Any]:
+    """Остановить профиль через реестр."""
     if not str(profile_id or "").strip():
-        return _error("Не указан профиль AdsPower.")
+        return _error("Не указан profile_id.")
     try:
-        res = await adspower_sync.stop_profile(str(profile_id).strip())
+        from core.antidetect_registry import get_registry
+        registry = get_registry()
+        res = await registry.stop_profile(str(profile_id).strip(), tenant_id=tenant_id)
         if res.get("status") != "ok":
-            return _error(str(res.get("message") or "Не удалось остановить профиль AdsPower."), dict(res))
+            return _error(str(res.get("message") or "Не удалось остановить профиль."), dict(res))
         return _ok(
-            "Профиль AdsPower остановлен.",
+            "Профиль остановлен.",
             {"profile_id": str(profile_id).strip(), "raw": res.get("raw")},
         )
     except Exception as exc:
-        logger.exception("adspower_launcher.stop_profile: %s", exc)
-        return _error("Ошибка остановки профиля AdsPower.")
+        logger.exception("launcher.stop_profile %s: %s", profile_id, exc)
+        return _error("Ошибка остановки профиля.")
 
 
-async def check_profile_health(profile_id: str) -> dict[str, Any]:
+async def check_profile_health(profile_id: str, tenant_id: str = "default") -> dict[str, Any]:
+    """Запустить профиль и сразу остановить — проверка доступности."""
     if not str(profile_id or "").strip():
-        return _error("Не указан профиль AdsPower.")
+        return _error("Не указан profile_id.")
     try:
-        started = await start_profile(profile_id)
+        started = await start_profile(profile_id, tenant_id=tenant_id)
         if started.get("status") != "ok":
             return _error(
-                str(started.get("message") or "Профиль не удалось запустить."),
-                {
-                    "profile_id": str(profile_id).strip(),
-                    "launch_ok": False,
-                },
+                str(started.get("message") or "Профиль не запустился."),
+                {"profile_id": str(profile_id).strip(), "launch_ok": False},
             )
         ws_endpoint = str((started.get("data") or {}).get("ws_endpoint") or "")
-        stopped = await stop_profile(profile_id)
+        stopped = await stop_profile(profile_id, tenant_id=tenant_id)
         return _ok(
-            "Профиль доступен через AdsPower API.",
+            "Профиль доступен.",
             {
                 "profile_id": str(profile_id).strip(),
                 "launch_ok": True,
@@ -81,5 +88,5 @@ async def check_profile_health(profile_id: str) -> dict[str, Any]:
             },
         )
     except Exception as exc:
-        logger.exception("adspower_launcher.check_profile_health: %s", exc)
-        return _error("Не удалось проверить профиль AdsPower.")
+        logger.exception("launcher.check_profile_health %s: %s", profile_id, exc)
+        return _error("Не удалось проверить профиль.")

@@ -21,6 +21,8 @@ type Screenshot = {
   created_at?: string;
 };
 
+type Profile = { adspower_profile_id: string; profile_name?: string };
+
 function taskBadgeClass(st?: string) {
   if (st === "success") return "status-active";
   if (st === "error") return "status-banned";
@@ -47,6 +49,13 @@ export function UploadsPage() {
   const [tab, setTab] = useState<TabKey>("all");
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [publishTaskId, setPublishTaskId] = useState<number | null>(null);
+  const [publishProfileId, setPublishProfileId] = useState("");
+  const [publishTitle, setPublishTitle] = useState("");
+  const [publishDescription, setPublishDescription] = useState("");
+  const [publishTags, setPublishTags] = useState("");
+  const [publishComment, setPublishComment] = useState("");
+  const [publishBusy, setPublishBusy] = useState(false);
 
   const tasksQ = useQuery({
     queryKey: ["tasks", tenantId],
@@ -57,6 +66,12 @@ export function UploadsPage() {
   const screenshotsQ = useQuery({
     queryKey: ["screenshots", tenantId],
     queryFn: () => apiFetch<ApiJson>("/api/screenshots", { tenantId }),
+    staleTime: 30_000,
+  });
+
+  const profilesQ = useQuery({
+    queryKey: ["adspower-profiles", tenantId],
+    queryFn: () => apiFetch<ApiJson>("/api/adspower/profiles", { tenantId }),
     staleTime: 30_000,
   });
 
@@ -99,9 +114,37 @@ export function UploadsPage() {
     onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
   });
 
+  const publishMut = useMutation({
+    mutationFn: (payload: {
+      task_id: number;
+      adspower_profile_id: string;
+      title: string;
+      description: string;
+      comment: string;
+      tags: string[];
+      run_now: boolean;
+    }) =>
+      apiFetch<ApiJson>("/api/publish/jobs", {
+        method: "POST",
+        tenantId,
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: async () => {
+      setToast({ msg: "Publish job создан и отправлен в работу", kind: "ok" });
+      setPublishTaskId(null);
+      await qc.invalidateQueries({ queryKey: ["tasks", tenantId] });
+    },
+    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
+  });
+
   const allRows = useMemo(
     () => ((tasksQ.data?.tasks as TaskRow[] | undefined) ?? []).slice().reverse(),
     [tasksQ.data]
+  );
+
+  const profiles = useMemo(
+    () => ((profilesQ.data?.profiles as Profile[] | undefined) ?? []),
+    [profilesQ.data]
   );
 
   const screenshots = useMemo(
@@ -143,8 +186,77 @@ export function UploadsPage() {
     { key: "history", label: "История", count: successCount + errorCount },
   ];
 
+  useEffect(() => {
+    if (!publishProfileId && profiles.length > 0) {
+      setPublishProfileId(profiles[0].adspower_profile_id);
+    }
+  }, [profiles, publishProfileId]);
+
+  function extractTagsFromText(text: string): string[] {
+    const matches = text.match(/#[\p{L}\p{N}_-]+/gu) || [];
+    const clean = matches
+      .map((m) => m.replace(/^#+/, "").trim())
+      .filter(Boolean);
+    return Array.from(new Set(clean)).slice(0, 30);
+  }
+
+  async function openOneClickPublish(row: TaskRow) {
+    if (!profiles.length) {
+      setToast({ msg: "Сначала подключите AdsPower профиль в разделе Profiles.", kind: "err" });
+      return;
+    }
+    setPublishTaskId(row.id);
+    setPublishTitle("");
+    setPublishDescription("");
+    setPublishTags("");
+    setPublishComment("");
+    setPublishBusy(true);
+    try {
+      const fileName = (row.original_video || "").split(/[/\\]/).pop() || "YouTube Shorts";
+      const niche = fileName.replace(/\.[a-z0-9]+$/i, "").slice(0, 80) || "YouTube Shorts";
+      const ai = await apiFetch<ApiJson>("/api/ai/preview", {
+        method: "POST",
+        tenantId,
+        body: JSON.stringify({ niche, hook_pattern: "auto", n_variants: 3 }),
+      });
+      const generatedTitle = String(ai.title || "").trim();
+      const generatedDescription = String(ai.description || "").trim();
+      const generatedComment = String(ai.comment || "").trim();
+      setPublishTitle(generatedTitle);
+      setPublishDescription(generatedDescription);
+      setPublishComment(generatedComment);
+      setPublishTags(extractTagsFromText(generatedDescription).join(", "));
+    } catch {
+      setToast({ msg: "Не удалось сгенерировать метаданные, заполните поля вручную.", kind: "err" });
+    } finally {
+      setPublishBusy(false);
+    }
+  }
+
+  function submitOneClickPublish() {
+    if (!publishTaskId) return;
+    if (!publishProfileId) {
+      setToast({ msg: "Выберите профиль для публикации.", kind: "err" });
+      return;
+    }
+    const tags = publishTags
+      .split(/[,\s]+/)
+      .map((t) => t.trim().replace(/^#+/, ""))
+      .filter(Boolean)
+      .slice(0, 30);
+    publishMut.mutate({
+      task_id: publishTaskId,
+      adspower_profile_id: publishProfileId,
+      title: publishTitle.trim(),
+      description: publishDescription.trim(),
+      comment: publishComment.trim(),
+      tags,
+      run_now: true,
+    });
+  }
+
   return (
-    <section className="page">
+    <section className="page uploads-page">
       {toast && (
         <div className="toast-container">
           <div className={`toast-v2 ${toast.kind === "err" ? "error" : "success"}`}>
@@ -308,9 +420,14 @@ export function UploadsPage() {
                           </button>
                         )}
                         {done && (
-                          <button type="button" className="action-btn" onClick={(e) => { e.stopPropagation(); window.open(apiUrl(`/api/tasks/${row.id}/download`), "_blank"); }}>
-                            Скачать
-                          </button>
+                          <>
+                            <button type="button" className="action-btn" onClick={(e) => { e.stopPropagation(); void openOneClickPublish(row); }}>
+                              One-click publish
+                            </button>
+                            <button type="button" className="action-btn" onClick={(e) => { e.stopPropagation(); window.open(apiUrl(`/api/tasks/${row.id}/download`), "_blank"); }}>
+                              Скачать
+                            </button>
+                          </>
                         )}
                       </div>
                     </td>
@@ -337,6 +454,64 @@ export function UploadsPage() {
           </table>
         </div>
       </div>
+      {publishTaskId != null && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-header">
+            <span className="card-title">One-click publish · task #{publishTaskId}</span>
+            <button type="button" className="btn btn-sm" onClick={() => setPublishTaskId(null)} style={{ marginLeft: "auto" }}>
+              Закрыть
+            </button>
+          </div>
+          <div className="card-body" style={{ display: "grid", gap: 10 }}>
+            <select className="form-input" value={publishProfileId} onChange={(e) => setPublishProfileId(e.target.value)} disabled={publishBusy || publishMut.isPending}>
+              {profiles.map((p) => (
+                <option key={p.adspower_profile_id} value={p.adspower_profile_id}>
+                  {p.profile_name || p.adspower_profile_id}
+                </option>
+              ))}
+            </select>
+            <input
+              className="form-input"
+              placeholder="Title"
+              value={publishTitle}
+              onChange={(e) => setPublishTitle(e.target.value)}
+              disabled={publishBusy || publishMut.isPending}
+            />
+            <textarea
+              className="form-input"
+              rows={3}
+              placeholder="Description"
+              value={publishDescription}
+              onChange={(e) => setPublishDescription(e.target.value)}
+              disabled={publishBusy || publishMut.isPending}
+            />
+            <input
+              className="form-input"
+              placeholder="Tags: comma or space separated"
+              value={publishTags}
+              onChange={(e) => setPublishTags(e.target.value)}
+              disabled={publishBusy || publishMut.isPending}
+            />
+            <input
+              className="form-input"
+              placeholder="Pinned comment (optional)"
+              value={publishComment}
+              onChange={(e) => setPublishComment(e.target.value)}
+              disabled={publishBusy || publishMut.isPending}
+            />
+            <div className="btn-group">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={submitOneClickPublish}
+                disabled={publishBusy || publishMut.isPending || !publishProfileId}
+              >
+                {publishBusy ? "Генерация..." : publishMut.isPending ? "Создание job..." : "Создать publish job"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

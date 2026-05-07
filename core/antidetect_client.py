@@ -423,20 +423,231 @@ class MultiloginClient(AntidetectClient):
         return _ok({"raw": payload})
 
 
+# ── GoLogin ──────────────────────────────────────────────────────────────────
+
+class GoLoginClient(AntidetectClient):
+    """
+    GoLogin Local REST API.
+    Порт по умолчанию: 36912.
+    Документация: https://gologin.com/local-api
+    API-ключ не требуется для локального агента.
+    """
+
+    async def fetch_profiles(self) -> dict[str, Any]:
+        payload = await self._get_json("/browser_profiles?page=1&per_page=200")
+        if payload is None:
+            return _error("GoLogin не отвечает. Убедитесь, что приложение запущено.")
+        # GoLogin возвращает { "data": [...] } или напрямую список
+        raw_list: list[Any] = []
+        if isinstance(payload, dict):
+            raw_list = payload.get("data") or payload.get("profiles") or []
+        elif isinstance(payload, list):
+            raw_list = payload
+        if not isinstance(raw_list, list):
+            raw_list = []
+        profiles: list[dict[str, Any]] = []
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            uid = str(item.get("uuid") or item.get("id") or item.get("profile_id") or "").strip()
+            if not uid:
+                continue
+            profiles.append({
+                "profile_id": uid,
+                "name": str(item.get("name") or item.get("title") or uid),
+                "raw": item,
+            })
+        return _ok({"profiles": profiles})
+
+    async def start_profile(self, profile_id: str) -> dict[str, Any]:
+        # GoLogin поддерживает и GET, и POST — пробуем GET сначала
+        payload = await self._get_json(f"/browser_profiles/{profile_id}/start")
+        if payload is None:
+            # Fallback: POST
+            payload = await self._post_json(f"/browser_profiles/{profile_id}/start")
+        if payload is None:
+            return _error("GoLogin не отвечает при запуске профиля.")
+        if isinstance(payload, dict):
+            ws = (
+                payload.get("wsUrl") or payload.get("ws_url")
+                or payload.get("wsEndpoint") or payload.get("webSocketDebuggerUrl")
+            )
+            if isinstance(ws, str) and ws.startswith("ws"):
+                return _ok({"ws_endpoint": ws, "raw": payload})
+            # Иногда GoLogin возвращает { data: { wsUrl: ... } }
+            data = payload.get("data") or {}
+            if isinstance(data, dict):
+                ws = data.get("wsUrl") or data.get("wsEndpoint")
+                if isinstance(ws, str) and ws.startswith("ws"):
+                    return _ok({"ws_endpoint": ws, "raw": data})
+        return _error("GoLogin не вернул wsUrl. Проверьте, что приложение обновлено.")
+
+    async def stop_profile(self, profile_id: str) -> dict[str, Any]:
+        payload = await self._get_json(f"/browser_profiles/{profile_id}/stop")
+        if payload is None:
+            payload = await self._post_json(f"/browser_profiles/{profile_id}/stop")
+        if payload is None:
+            return _error("GoLogin не отвечает при остановке профиля.")
+        return _ok({"raw": payload})
+
+
+# ── Undetectable.io ───────────────────────────────────────────────────────────
+
+class UndetectableClient(AntidetectClient):
+    """
+    Undetectable.io Local API.
+    Порт по умолчанию: 25325.
+    Документация: https://undetectable.io/docs/local-api
+    """
+
+    async def fetch_profiles(self) -> dict[str, Any]:
+        # Undetectable принимает GET /list с опциональным ?status=Active
+        payload = await self._get_json("/list?status=Active&page=0&pageLen=200")
+        if payload is None:
+            # Fallback без параметров
+            payload = await self._get_json("/list")
+        if payload is None:
+            return _error("Undetectable не отвечает. Убедитесь, что приложение запущено.")
+        raw_list: list[Any] = []
+        if isinstance(payload, list):
+            raw_list = payload
+        elif isinstance(payload, dict):
+            raw_list = payload.get("data") or payload.get("profiles") or payload.get("list") or []
+        profiles: list[dict[str, Any]] = []
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            uid = str(item.get("id") or item.get("uuid") or item.get("profile_id") or "").strip()
+            if not uid:
+                continue
+            profiles.append({
+                "profile_id": uid,
+                "name": str(item.get("name") or item.get("title") or uid),
+                "raw": item,
+            })
+        return _ok({"profiles": profiles})
+
+    async def start_profile(self, profile_id: str) -> dict[str, Any]:
+        payload = await self._post_json("/start", {"profile_id": profile_id})
+        if payload is None:
+            # Fallback: GET-стиль
+            payload = await self._get_json(f"/start?profile_id={profile_id}")
+        if payload is None:
+            return _error("Undetectable не отвечает при запуске профиля.")
+        if isinstance(payload, dict):
+            ws = (
+                payload.get("wsUrl") or payload.get("ws_url")
+                or payload.get("wsEndpoint") or payload.get("ws")
+            )
+            if isinstance(ws, str) and ws.startswith("ws"):
+                return _ok({"ws_endpoint": ws, "raw": payload})
+            data = payload.get("data") or {}
+            if isinstance(data, dict):
+                ws = data.get("wsUrl") or data.get("wsEndpoint")
+                if isinstance(ws, str) and ws.startswith("ws"):
+                    return _ok({"ws_endpoint": ws, "raw": data})
+        return _error("Undetectable не вернул wsUrl.")
+
+    async def stop_profile(self, profile_id: str) -> dict[str, Any]:
+        payload = await self._post_json("/stop", {"profile_id": profile_id})
+        if payload is None:
+            payload = await self._get_json(f"/stop?profile_id={profile_id}")
+        if payload is None:
+            return _error("Undetectable не отвечает при остановке профиля.")
+        return _ok({"raw": payload})
+
+
+# ── MoreLogin ─────────────────────────────────────────────────────────────────
+
+class MoreLoginClient(AntidetectClient):
+    """
+    MoreLogin Local API.
+    Порт по умолчанию: 8888.
+    Популярен для UBT-арбитража.
+    Документация: https://www.morelogin.com/blog/api-guide
+    Требует api_key (токен из настроек приложения).
+    """
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self.api_key:
+            return {
+                "Authorization": self.api_key,
+                "Content-Type": "application/json",
+            }
+        return {"Content-Type": "application/json"}
+
+    async def fetch_profiles(self) -> dict[str, Any]:
+        payload = await self._post_json("/api/env/list", {"page": 1, "pageSize": 200})
+        if payload is None:
+            return _error("MoreLogin не отвечает. Убедитесь, что приложение запущено.")
+        if isinstance(payload, dict) and payload.get("code") not in (0, None, "0", "success"):
+            return _error(str(payload.get("msg") or payload.get("message") or "Ошибка MoreLogin API."))
+        data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
+        raw_list: list[Any] = []
+        if isinstance(data, dict):
+            raw_list = data.get("dataList") or data.get("list") or data.get("profiles") or []
+        elif isinstance(data, list):
+            raw_list = data
+        profiles: list[dict[str, Any]] = []
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            uid = str(item.get("envId") or item.get("id") or item.get("profile_id") or "").strip()
+            if not uid:
+                continue
+            profiles.append({
+                "profile_id": uid,
+                "name": str(item.get("envName") or item.get("name") or uid),
+                "raw": item,
+            })
+        return _ok({"profiles": profiles})
+
+    async def start_profile(self, profile_id: str) -> dict[str, Any]:
+        payload = await self._post_json("/api/env/start", {"envId": profile_id})
+        if payload is None:
+            return _error("MoreLogin не отвечает при запуске профиля.")
+        if isinstance(payload, dict):
+            data = payload.get("data") or {}
+            if isinstance(data, dict):
+                ws = (
+                    data.get("ws") or data.get("wsUrl") or data.get("wsEndpoint")
+                    or data.get("webSocketDebuggerUrl")
+                )
+                if isinstance(ws, str) and ws.startswith("ws"):
+                    return _ok({"ws_endpoint": ws, "raw": data})
+            # Иногда прямо в корне ответа
+            ws = payload.get("ws") or payload.get("wsUrl") or payload.get("wsEndpoint")
+            if isinstance(ws, str) and ws.startswith("ws"):
+                return _ok({"ws_endpoint": ws, "raw": payload})
+        return _error("MoreLogin не вернул wsEndpoint.")
+
+    async def stop_profile(self, profile_id: str) -> dict[str, Any]:
+        payload = await self._post_json("/api/env/close", {"envId": profile_id})
+        if payload is None:
+            return _error("MoreLogin не отвечает при остановке профиля.")
+        return _ok({"raw": payload})
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 _BROWSER_TYPES: dict[str, type[AntidetectClient]] = {
-    "adspower":   AdsPowerClient,
-    "dolphin":    DolphinClient,
-    "octo":       OctoClient,
-    "multilogin": MultiloginClient,
+    "adspower":      AdsPowerClient,
+    "dolphin":       DolphinClient,
+    "octo":          OctoClient,
+    "multilogin":    MultiloginClient,
+    "gologin":       GoLoginClient,
+    "undetectable":  UndetectableClient,
+    "morelogin":     MoreLoginClient,
 }
 
 _DEFAULT_PORTS: dict[str, int] = {
-    "adspower":   50325,
-    "dolphin":    3001,
-    "octo":       58888,
-    "multilogin": 35000,
+    "adspower":      50325,
+    "dolphin":       3001,
+    "octo":          58888,
+    "multilogin":    35000,
+    "gologin":       36912,
+    "undetectable":  25325,
+    "morelogin":     8888,
 }
 
 

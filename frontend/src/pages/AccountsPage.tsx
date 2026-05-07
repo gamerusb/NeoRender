@@ -68,7 +68,15 @@ export function AccountsPage() {
 
   return (
     <section className="page">
-      {toast && <div className="toast show ok">{toast}</div>}
+      {toast && (
+        <div className="toast-container">
+          <div className="toast-v2 success">
+            <span className="toast-v2-icon">✓</span>
+            <span className="toast-v2-msg">{toast}</span>
+            <button type="button" className="toast-v2-close" onClick={() => setToast("")} aria-label="Закрыть">✕</button>
+          </div>
+        </div>
+      )}
       <div className="two-col">
         <div>
           <div className="card section-gap">

@@ -199,9 +199,9 @@ RENDER_PRESETS: dict[str, dict[str, Any]] = {
     "deep": {
         "label":         "Глубокий",
         "desc":          "Оптимальный баланс уникальности и качества",
-        "saturation":    (1.20, 1.80),
-        "contrast":      (0.95, 1.15),
-        "brightness":    (-0.08, 0.08),
+        "saturation":    (1.04, 1.12),
+        "contrast":      (0.98, 1.04),
+        "brightness":    (-0.04, 0.04),
         "atempo":        (0.980, 1.020),
         "crf_x264":      23,
         "preset_x264":   "fast",
@@ -213,9 +213,9 @@ RENDER_PRESETS: dict[str, dict[str, Any]] = {
     "ultra": {
         "label":         "Ультра",
         "desc":          "Максимальная переработка + лучшее качество рендера",
-        "saturation":    (1.35, 2.00),
-        "contrast":      (0.90, 1.20),
-        "brightness":    (-0.10, 0.10),
+        "saturation":    (1.06, 1.18),
+        "contrast":      (0.96, 1.08),
+        "brightness":    (-0.05, 0.05),
         "atempo":        (0.975, 1.025),
         "crf_x264":      20,
         "preset_x264":   "slow",
@@ -1272,6 +1272,7 @@ def build_filter_complex(
     micro_dw: int = 0,
     micro_dh: int = 0,
     ass_path: str = "",
+    shorts_loop_fade_sec: float = 0.0,
 ) -> tuple[str, str]:
     """
     Сборка filter_complex. Возвращает (строка фильтра, метка видеовыхода для -map).
@@ -1342,8 +1343,8 @@ def build_filter_complex(
         invis_text = _uuid.uuid4().hex[:12]
         invis_xy = (random.randint(2, 28), random.randint(2, 28))
 
-    # Colorspace round-trip: 50% шанс — тонкие хроминансные артефакты меняют хеш.
-    colorspace_roundtrip = random.random() < 0.50
+    # Colorspace round-trip: 15% шанс — снижено, чтобы избежать заметных хроминансных артефактов.
+    colorspace_roundtrip = random.random() < 0.15
 
     # Линзовая дисторсия — 65% шанс; сила зависит от пресета.
     _lens_strength = {"standard": 0.004, "soft": 0.003, "deep": 0.008, "ultra": 0.012}.get(
@@ -1360,18 +1361,11 @@ def build_filter_complex(
         shake_freq = round(random.uniform(1.4, 3.8), 3)
         shake_amp  = round(random.uniform(0.0007, 0.0022), 6)
 
-    # ── Авто-hflip: меняет spatial hash Content ID без артефактов ───────────────
-    # standard/soft: 25-30% — горизонтальный флип один из самых эффективных методов против Content ID;
-    # ранее был 0% для этих пресетов, что делало их уязвимыми даже при цветовых правках.
-    _hflip_prob = {"standard": 0.25, "soft": 0.30, "deep": 0.40, "ultra": 0.55}.get(
-        _normalize_preset(preset_key), 0.0
-    )
-    auto_hflip = random.random() < _hflip_prob
+    # ── Авто-hflip отключён: переворот текста, лиц и логотипов очень заметен зрителю ──
+    auto_hflip = False
 
-    # ── Segment reverse: инвертируем первые 2–4 сек (ломает temporal sliding window) ──
-    # Content ID матчит по 10-секундным окнам; реверс первого сегмента смещает все окна.
-    # ultra: 60% — максимальная защита временного отпечатка.
-    _seg_rev_prob = {"deep": 0.30, "ultra": 0.60}.get(_normalize_preset(preset_key), 0.0)
+    # ── Segment reverse отключён: реверс первых секунд слишком заметен зрителю ──
+    _seg_rev_prob = {"deep": 0.0, "ultra": 0.0}.get(_normalize_preset(preset_key), 0.0)
     _do_seg_reverse = (
         random.random() < _seg_rev_prob
         and bool(duration_sec)
@@ -1442,13 +1436,13 @@ def build_filter_complex(
     # ── Авто видео-зерно: тонкий шум на кадрах меняет пиксельный hash без видимых артефактов ──
     # Активируется только если noise-эффект не включён явно (избегаем двойного шума).
     # deep: 50%, ultra: 65% — достаточно для смены pHash-отпечатка.
-    _auto_noise_prob = {"standard": 0.0, "soft": 0.20, "deep": 0.50, "ultra": 0.65}.get(
+    _auto_noise_prob = {"standard": 0.0, "soft": 0.10, "deep": 0.20, "ultra": 0.30}.get(
         preset_key, 0.0
     )
     auto_noise_s = 0
     if not eff.get("noise") and random.random() < _auto_noise_prob:
-        _noise_max = {"soft": 3, "deep": 4, "ultra": 6}.get(preset_key, 4)
-        auto_noise_s = random.randint(2, _noise_max)
+        _noise_max = {"soft": 2, "deep": 2, "ultra": 3}.get(preset_key, 2)
+        auto_noise_s = random.randint(1, _noise_max)
 
     def _lvl(key: str) -> str:
         raw = str(e_levels_raw.get(key, "med")).strip().lower()
@@ -1684,7 +1678,7 @@ def build_filter_complex(
             # Лёгкий тональный профиль без агрессивных артефактов.
             lvl = _lvl("audio_tone")
             if lvl == "low":
-                a_chain += ",highpass=f=60,lowpass=f=14000,acompressor=threshold=-22dB:ratio=1.6:attack=24:release=140:makeup=0.7"
+                a_chain += ",highpass=f=60,lowpass=f=14000,acompressor=threshold=-22dB:ratio=1.6:attack=24:release=140:makeup=1"
             elif lvl == "high":
                 a_chain += ",highpass=f=100,lowpass=f=10000,acompressor=threshold=-16dB:ratio=2.5:attack=16:release=100:makeup=1.2"
             else:
@@ -1730,8 +1724,24 @@ def build_filter_complex(
                 f"[{_apre_tag}][{_ns_tag}]amix=inputs=2:duration=first:normalize=0[aout]"
             )
 
+    # ── Seamless loop для Shorts: xfade конец→начало ─────────────────────────
+    # Когда YouTube авто-реплеит Short, кросс-фейд делает переход незаметным.
+    # Требует: duration_sec известна и ролик длиннее 4× fade.
+    _vtag_for_sub = "vout"
+    if shorts_loop_fade_sec > 0.01 and duration_sec and duration_sec > shorts_loop_fade_sec * 4:
+        D = round(min(shorts_loop_fade_sec, duration_sec * 0.15), 3)  # ≤15% длины
+        O = round(max(0.05, duration_sec - D - 0.12), 3)
+        luid = uid + 200
+        chains.append(
+            f"[vout]split=2[vsl_m{luid}][vsl_hr{luid}];"
+            f"[vsl_hr{luid}]trim=end={D:.3f},setpts=PTS-STARTPTS[vsl_h{luid}];"
+            f"[vsl_m{luid}][vsl_h{luid}]"
+            f"xfade=transition=fade:duration={D:.3f}:offset={O:.3f}[vlooped{luid}]"
+        )
+        _vtag_for_sub = f"vlooped{luid}"
+
     fc = ";".join(chains)
-    vmap = "[vout]"
+    vmap = f"[{_vtag_for_sub}]"
 
     # ── Тайм-кодные субтитры: ASS имеет приоритет над SRT ────────────────────
     # ASS от subtitle_generator — полная стилизация (шрифт Gmarket, fade, позиция).
@@ -1744,7 +1754,7 @@ def build_filter_complex(
         fd = _optional_fonts_dir_for_subtitles()
         if fd:
             fd_ex = f":fontsdir='{_escape_subtitles_path(fd)}'"
-        fc += f";[vout]ass='{esc}'{fd_ex}[vfinal]"
+        fc += f";[{_vtag_for_sub}]ass='{esc}'{fd_ex}[vfinal]"
         vmap = "[vfinal]"
     elif sp and Path(sp).is_file():
         esc = _escape_subtitles_path(str(Path(sp).resolve()))
@@ -1753,7 +1763,7 @@ def build_filter_complex(
         fd = _optional_fonts_dir_for_subtitles()
         if fd:
             fd_ex = f":fontsdir='{_escape_subtitles_path(fd)}'"
-        fc += f";[vout]subtitles='{esc}':charenc=UTF-8{fd_ex}:force_style='{fs}'[vfinal]"
+        fc += f";[{_vtag_for_sub}]subtitles='{esc}':charenc=UTF-8{fd_ex}:force_style='{fs}'[vfinal]"
         vmap = "[vfinal]"
     return fc, vmap
 
@@ -1791,6 +1801,8 @@ async def render_unique_video(
     auto_trim_lead_tail: bool = True,
     perceptual_hash_check: bool = True,
     preview_duration_sec: float | None = None,
+    shorts_loop: bool = False,
+    shorts_loop_fade_sec: float = 0.5,
 ) -> dict[str, Any]:
     """
     Рендер уникальной версии ролика.
@@ -1973,6 +1985,7 @@ async def render_unique_video(
             micro_dw=micro_dw,
             micro_dh=micro_dh,
             ass_path=ass_use,
+            shorts_loop_fade_sec=float(shorts_loop_fade_sec) if shorts_loop else 0.0,
         )
 
         if not (fc or "").strip():

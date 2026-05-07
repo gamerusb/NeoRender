@@ -45,7 +45,7 @@ export function PnLPage() {
                 <div key={r.label} className="pnl-bar-row">
                   <span className="pnl-bar-label">{r.label}</span>
                   <div className="pnl-bar-track"><div className="pnl-bar-fill pnl-bar-expense" style={{ width:`${r.pct}%` }}>{r.val}</div></div>
-                  <div className="pnl-bar-value pnl-negative">{r.val}</div>
+                  <div className="pnl-bar-value pnl-negative">{r.pct}% · {r.val}</div>
                 </div>
               ))}
             </div>
@@ -56,11 +56,11 @@ export function PnLPage() {
             <div className="card-header"><span className="card-title">Доход vs Расход</span></div>
             <div className="card-body">
               <div style={{ marginBottom:16 }}>
-                <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"var(--text-tertiary)", marginBottom:6 }}><span>Доход</span><span style={{ color:"var(--accent-green)" }}>$4,820</span></div>
+                <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"var(--text-tertiary)", marginBottom:6 }}><span>Доход</span><span style={{ color:"var(--accent-green)" }}>92% · $4,820</span></div>
                 <div style={{ height:24, background:"var(--bg-hover)", borderRadius:"var(--radius-sm)", overflow:"hidden" }}><div style={{ height:"100%", width:"92%", background:"var(--accent-green)", borderRadius:"var(--radius-sm)", opacity:0.7 }}></div></div>
               </div>
               <div style={{ marginBottom:16 }}>
-                <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"var(--text-tertiary)", marginBottom:6 }}><span>Расход</span><span style={{ color:"var(--accent-red)" }}>$387</span></div>
+                <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"var(--text-tertiary)", marginBottom:6 }}><span>Расход</span><span style={{ color:"var(--accent-red)" }}>8% · $387</span></div>
                 <div style={{ height:24, background:"var(--bg-hover)", borderRadius:"var(--radius-sm)", overflow:"hidden" }}><div style={{ height:"100%", width:"8%", background:"var(--accent-red)", borderRadius:"var(--radius-sm)", opacity:0.7 }}></div></div>
               </div>
               <div style={{ borderTop:"1px solid var(--border-subtle)", paddingTop:12, display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>

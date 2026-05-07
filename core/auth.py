@@ -25,7 +25,22 @@ logger = logging.getLogger(__name__)
 # В продакшне обязательно задать через переменную окружения NEO_JWT_SECRET
 
 _DEFAULT_SECRET = "neorender-super-secret-change-in-production-2025"
-JWT_SECRET = os.environ.get("NEO_JWT_SECRET", _DEFAULT_SECRET)
+_env_secret = os.environ.get("NEO_JWT_SECRET", "").strip()
+_is_production = os.environ.get("NEORENDER_ENV", "").strip().lower() == "production"
+
+if _is_production and not _env_secret:
+    raise RuntimeError(
+        "NEO_JWT_SECRET обязателен в production-режиме. "
+        "Задайте переменную окружения NEO_JWT_SECRET."
+    )
+
+if not _env_secret:
+    logger.warning(
+        "NEO_JWT_SECRET не задан — используется дефолтный секрет. "
+        "Задайте NEO_JWT_SECRET перед выдачей доступа другим пользователям."
+    )
+
+JWT_SECRET = _env_secret or _DEFAULT_SECRET
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("NEO_JWT_EXPIRE_MINUTES", "1440"))  # 24h
 

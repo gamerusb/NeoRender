@@ -1,1034 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { flushSync } from "react-dom";
-import {
-  Clapperboard,
-  ChevronDown,
-  CloudUpload,
-  Download,
-  Film,
-  GripVertical,
-  Layers,
-  Palette,
-  PanelsTopLeft,
-  Play,
-  Rocket,
-  Save,
-  Sparkles,
-  WandSparkles,
-  Zap,
-} from "lucide-react";
-import { apiFetch, apiUrl, downloadTaskMp4, type ApiJson } from "@/api";
-import { useTenant } from "@/tenant/TenantContext";
+"""Rebuilds UniqualizerPage.tsx: keeps lines 1-1001 (logic) and replaces the return statement."""
+import pathlib, sys
 
-type UqSettings = {
-  preset?: string;
-  template?: string;
-  overlay_blend_mode?: string;
-  overlay_opacity?: number;
-  subtitle?: string;
-  subtitle_srt_path?: string;
-  overlay_media_path?: string;
-  available_presets?: unknown;
-  available_templates?: unknown;
-  available_overlay_blends?: unknown;
-  available_geo_profiles?: Record<string, { lat: number; lng: number; label?: string }>;
-  /** Значение модели в метаданных → подпись (пресеты «отпечатка»). */
-  available_device_models?: unknown;
-  geo_enabled?: boolean;
-  geo_profile?: string;
-  geo_jitter?: number;
-  device_model?: string;
-  niche?: string;
-  overlay_mode?: string;
-  overlay_position?: string;
-  subtitle_style?: string;
-  /** Имя шрифта как в системе сервера (libass). Пусто = случайный из пула. */
-  subtitle_font?: string;
-  /** 0 = авто (размер из шаблона). */
-  subtitle_font_size?: number;
-  effects?: Record<string, boolean>;
-  effect_levels?: Record<string, string>;
-  available_effects?: Record<string, string>;
-  available_effect_levels?: Record<string, string>;
-  uniqualize_intensity?: string;
-  available_uniqualize_intensity?: Record<string, { label?: string; desc?: string }>;
-  tags?: string[];
-  thumbnail_path?: string;
-  /** Seamless loop для YouTube Shorts: xfade конец→начало. */
-  shorts_loop?: boolean;
-  /** Длительность crossfade-петли в секундах (0.2–2.0). */
-  shorts_loop_fade_sec?: number;
-};
+src = pathlib.Path("frontend/src/pages/UniqualizerPage.tsx")
+lines = src.read_text(encoding="utf-8").splitlines(keepends=True)
+top = "".join(lines[:1001])  # everything up to (not including) the return statement
 
-type OptionItem = { value: string; label: string };
-
-function normalizeOptions(input: unknown): OptionItem[] {
-  if (Array.isArray(input)) {
-    return input.map((v) => {
-      const s = String(v ?? "");
-      return { value: s, label: s };
-    });
-  }
-  if (input && typeof input === "object") {
-    const out: OptionItem[] = [];
-    for (const [key, val] of Object.entries(input as Record<string, unknown>)) {
-      if (val && typeof val === "object") {
-        const rec = val as Record<string, unknown>;
-        out.push({ value: key, label: String(rec.label ?? key) });
-      } else {
-        out.push({ value: key, label: String(val ?? key) });
-      }
-    }
-    return out;
-  }
-  return [];
-}
-
-function labelFor(options: OptionItem[], value: string | undefined): string {
-  if (!value) return "-";
-  const hit = options.find((o) => o.value === value);
-  return hit?.label ?? value;
-}
-
-function snippetFromAiMeta(d: ApiJson | undefined): string {
-  if (!d) return "";
-  const o = String(d.overlay_text ?? "").trim();
-  const t = String(d.title ?? "").trim();
-  return (o || t).slice(0, 500);
-}
-
-function taskIdFromPayload(d: ApiJson | undefined): number {
-  if (!d) return 0;
-  const v = d.id;
-  if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
-  if (typeof v === "string") {
-    const n = parseInt(v.trim(), 10);
-    if (n > 0) return n;
-  }
-  return 0;
-}
-
-function toggleEffect(current: Record<string, boolean> | undefined, key: string): Record<string, boolean> {
-  const now = { ...(current || {}) };
-  now[key] = !Boolean(now[key]);
-  return now;
-}
-
-function setEffectLevel(
-  current: Record<string, string> | undefined,
-  key: string,
-  value: string,
-): Record<string, string> {
-  const next = { ...(current || {}) };
-  next[key] = value;
-  return next;
-}
-
-const OVERLAY_MODE_OPTS: OptionItem[] = [
-  { value: "on_top", label: "Поверх основного видео" },
-  { value: "under_video", label: "Под роликом (подложка)" },
-];
-
-const OVERLAY_POSITION_OPTS: OptionItem[] = [
-  { value: "top_left", label: "Верхний левый" },
-  { value: "top_right", label: "Верхний правый" },
-  { value: "bottom_left", label: "Нижний левый" },
-  { value: "bottom_right", label: "Нижний правый" },
-  { value: "center", label: "По центру" },
-];
-
-/**
- * Топ шрифтов под корейский контент / молодёжь (Shorts, Reels, 카톡-эстетика).
- * value = имя для libass на сервере (как в установленном шрифте); previewFamily — для превью в браузере.
- */
-const SUBTITLE_FONT_OPTIONS: { value: string; label: string; previewFamily?: string }[] = [
-  { value: "", label: "Авто (случайный из пула движка)" },
-  {
-    value: "Pretendard",
-    label: "Pretendard — самый популярный в KR-приложениях и сайтах",
-    previewFamily: '"Pretendard", -apple-system, BlinkMacSystemFont, sans-serif',
-  },
-  {
-    value: "Noto Sans KR",
-    label: "Noto Sans KR — нейтральный, для любого корейского текста",
-    previewFamily: '"Noto Sans KR", sans-serif',
-  },
-  {
-    value: "Nanum Gothic",
-    label: "Nanum Gothic (나눔고딕) — классика веб и баннеров",
-    previewFamily: '"Nanum Gothic", "NanumGothic", sans-serif',
-  },
-  {
-    value: "NanumGothic",
-    label: "NanumGothic — то же, если в Windows имя без пробела",
-    previewFamily: '"Nanum Gothic", "NanumGothic", sans-serif',
-  },
-  {
-    value: "Malgun Gothic",
-    label: "Malgun Gothic (맑은 고딕) — стандарт Windows (KR)",
-    previewFamily: '"Malgun Gothic", "Malgun Gothic UI", sans-serif',
-  },
-  {
-    value: "Apple SD Gothic Neo",
-    label: "Apple SD Gothic Neo — iPhone / macOS",
-    previewFamily: '"Apple SD Gothic Neo", "Malgun Gothic", sans-serif',
-  },
-  {
-    value: "Black Han Sans",
-    label: "Black Han Sans — жирные заголовки, шортсы, мемы",
-    previewFamily: '"Black Han Sans", sans-serif',
-  },
-  {
-    value: "Jua",
-    label: "Jua — округлый «милый» стиль (카페, лайфстайл)",
-    previewFamily: '"Jua", sans-serif',
-  },
-  {
-    value: "Do Hyeon",
-    label: "Do Hyeon — плакатный, заметный CTA",
-    previewFamily: '"Do Hyeon", sans-serif',
-  },
-  {
-    value: "Gowun Dodum",
-    label: "Gowun Dodum — спокойный гротеск, читаемый",
-    previewFamily: '"Gowun Dodum", sans-serif',
-  },
-  {
-    value: "Dongle",
-    label: "Dongle — компактный игривый (сторис)",
-    previewFamily: '"Dongle", sans-serif',
-  },
-  {
-    value: "Single Day",
-    label: "Single Day — лёгкая рукопись, тренды TikTok/Reels",
-    previewFamily: '"Single Day", cursive',
-  },
-  { value: "Montserrat", label: "Montserrat — латиница + микс с KR", previewFamily: '"Montserrat", sans-serif' },
-  { value: "Poppins", label: "Poppins — международные нарезки", previewFamily: '"Poppins", sans-serif' },
-  { value: "Arial", label: "Arial — запасной универсальный" },
-  { value: "Segoe UI", label: "Segoe UI" },
-];
-
-function subtitlePreviewFontCss(assFontName: string | undefined): string {
-  const v = String(assFontName || "").trim();
-  if (!v) return '"Pretendard", "Noto Sans KR", system-ui, sans-serif';
-  const hit = SUBTITLE_FONT_OPTIONS.find((o) => o.value === v);
-  if (hit?.previewFamily) return hit.previewFamily;
-  return `"${v.replace(/"/g, "")}", sans-serif`;
-}
-
-/** Пользовательский слой лежит в data/uploads/{tenant}/; иначе — встроенный overlay.png и т.п. */
-function pathLooksLikeTenantUpload(p: string): boolean {
-  return p.replace(/\\/g, "/").includes("/uploads/");
-}
-
-/** Подписи гео как в референсе (City, KR). */
-const GEO_CITY_EN_LINE: Record<string, string> = {
-  busan: "Busan, KR",
-  seoul: "Seoul, KR",
-  incheon: "Incheon, KR",
-  daegu: "Daegu, KR",
-  daejeon: "Daejeon, KR",
-  gwangju: "Gwangju, KR",
-  suwon: "Suwon, KR",
-  jeju: "Jeju, KR",
-  ulsan: "Ulsan, KR",
-  pohang: "Pohang, KR",
-};
-
-function geoKeyToDisplayLine(profile: string): string {
-  const raw = (profile || "").trim();
-  if (!raw) return "Busan, KR";
-  const k = raw.toLowerCase();
-  if (GEO_CITY_EN_LINE[k]) return GEO_CITY_EN_LINE[k];
-  const num = raw.replace(/\s/g, "");
-  const m = num.match(/^([+-]?\d+(?:\.\d+)?)[,;/]([+-]?\d+(?:\.\d+)?)$/);
-  if (m) return `${m[1]}, ${m[2]}`;
-  return raw;
-}
-
-function parseGeoDisplayToProfile(line: string): string {
-  const t = line.trim();
-  if (!t) return "busan";
-  const compact = t.replace(/\s/g, "").toLowerCase();
-  for (const [key, en] of Object.entries(GEO_CITY_EN_LINE)) {
-    if (en.replace(/\s/g, "").toLowerCase() === compact) return key;
-  }
-  const num = t.replace(/\s/g, "");
-  const m = num.match(/^([+-]?\d+(?:\.\d+)?)[,;/]([+-]?\d+(?:\.\d+)?)$/);
-  if (m) {
-    const lat = parseFloat(m[1]);
-    const lon = parseFloat(m[2]);
-    if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) return `${m[1]},${m[2]}`;
-  }
-  const asKey = t.toLowerCase().replace(/\s+/g, "_").replace(/,/g, "");
-  if (GEO_CITY_EN_LINE[asKey]) return asKey;
-  return t;
-}
-
-function filesWordRu(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "0 файлов";
-  const k = n % 10;
-  const kk = n % 100;
-  if (kk >= 11 && kk <= 14) return `${n} файлов`;
-  if (k === 1) return `${n} файл`;
-  if (k >= 2 && k <= 4) return `${n} файла`;
-  return `${n} файлов`;
-}
-
-const ICON_SZ = 16;
-const ICON_STROKE = 1.75;
-const LEVEL_CONTROL_EFFECTS = new Set(["crop_reframe", "gamma_jitter", "audio_tone"]);
-const DEFAULT_EFFECT_LEVELS: Record<string, string> = { low: "Low", med: "Med", high: "High" };
-const EFFECT_LEVEL_HINTS: Record<string, Record<string, string>> = {
-  crop_reframe: {
-    low: "Минимальный микрокроп и рефрейм, почти без заметной геометрии.",
-    med: "Умеренный микрокроп для дополнительной вариативности кадра.",
-    high: "Более выраженный микрокроп и рефрейм для сильной перестройки кадра.",
-  },
-  gamma_jitter: {
-    low: "Лёгкие колебания гаммы, почти незаметно визуально.",
-    med: "Средняя амплитуда гаммы, заметная, но аккуратная коррекция.",
-    high: "Сильнее изменяет гамму между рендерами, максимальная вариативность.",
-  },
-  audio_tone: {
-    low: "Мягкий тональный профиль, минимальное вмешательство в звук.",
-    med: "Сбалансированный эквалайзинг и компрессия для стабильного тона.",
-    high: "Более агрессивный тональный профиль и компрессия.",
-  },
-};
-
-const EFFECT_LEVEL_COLORS: Record<string, string> = {
-  low: "rgba(34, 197, 94, 0.18)",
-  med: "rgba(245, 158, 11, 0.18)",
-  high: "rgba(239, 68, 68, 0.2)",
-};
-const EFFECT_LEVEL_BORDERS: Record<string, string> = {
-  low: "rgba(34, 197, 94, 0.55)",
-  med: "rgba(245, 158, 11, 0.55)",
-  high: "rgba(239, 68, 68, 0.6)",
-};
-
-const DEVICE_MODEL_CUSTOM = "__custom__";
-
-/** Если с API не пришёл available_geo_profiles — тот же набор, что в luxury_engine._GEO_PROFILES. */
-/** Имя файла после загрузки на сервер (uuid32 + расширение). */
-const UPLOAD_VIDEO_BASENAME_RE = /^[a-f0-9]{32}\.(mp4|mov|webm|mkv|avi)$/i;
-
-function storedUploadBasenameFromPath(serverPath: string): string | null {
-  const s = serverPath.trim();
-  if (!s) return null;
-  const seg = s.split(/[/\\]/).pop() ?? "";
-  return UPLOAD_VIDEO_BASENAME_RE.test(seg) ? seg : null;
-}
-
-const UI_PRESETS = [
-  { key: "soft",       label: "Мягкий",      desc: "Минимальные изменения, почти как оригинал",  color: "linear-gradient(90deg,#8B6FA5,#AB8FC7)", backendPreset: "soft",  intensity: "low",  enableAllEffects: false },
-  { key: "medium",     label: "Средний",     desc: "Оптимальный баланс уникальности",             color: "linear-gradient(90deg,#A5344A,#C75060)", backendPreset: "deep",  intensity: "med",  enableAllEffects: false },
-  { key: "aggressive", label: "Агрессивный", desc: "Сильная переработка для повторной загрузки",  color: "linear-gradient(90deg,#C77830,#E89840)", backendPreset: "ultra", intensity: "high", enableAllEffects: false },
-  { key: "maximum",    label: "Максимум",    desc: "Максимальная уникализация, все эффекты",      color: "linear-gradient(90deg,#EF4444,#F97316)", backendPreset: "ultra", intensity: "high", enableAllEffects: true  },
-] as const;
-type UiPresetKey = typeof UI_PRESETS[number]["key"];
-
-export function UniqualizerPage() {
-  const { tenantId } = useTenant();
-  const qc = useQueryClient();
-
-  const [videoPath, setVideoPath] = useState("");
-  const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [videoBlobUrl, setVideoBlobUrl] = useState<string | null>(null);
-  const [videoDragOver, setVideoDragOver] = useState(false);
-  const [targetProfile, setTargetProfile] = useState("");
-  const [renderOnly, setRenderOnly] = useState(true);
-  const [checkDuplicates, setCheckDuplicates] = useState(true);
-  const [variantsCount, setVariantsCount] = useState(10);
-  /** По одной строке CTA на каждый variant; пусто = из поля «Текст на видео» / настроек пайплайна. */
-  const [variantsSubtitlesText, setVariantsSubtitlesText] = useState("");
-  const [rotateTemplates, setRotateTemplates] = useState(false);
-  const [randomizeEffects, setRandomizeEffects] = useState(true);
-  const [randomizeDeviceGeo, setRandomizeDeviceGeo] = useState(false);
-  const [variantsPriority, setVariantsPriority] = useState(0);
-  const [subtitleTouched, setSubtitleTouched] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
-  const [overlayFile, setOverlayFile] = useState<File | null>(null);
-  const [srtFile, setSrtFile] = useState<File | null>(null);
-  const [settings, setSettings] = useState<UqSettings>({});
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [activeUiPreset, setActiveUiPreset] = useState<UiPresetKey>("medium");
-
-  const [activeStep, setActiveStep] = useState(1);
-  /** guide — пошаговая блокировка; free — любой шаг без ограничений (опытные пользователи). */
-  const [flowMode, setFlowMode] = useState<"guide" | "free">("guide");
-  const [effectsReviewed, setEffectsReviewed] = useState(false);
-  /** Шаг «Слои» пройден (Далее) или есть загруженный слой / субтитры / текст. */
-  const [layersReviewed, setLayersReviewed] = useState(false);
-  const [layerPanelOpen, setLayerPanelOpen] = useState({ overlay: true, text: true, geo: false });
-  /** Только для режима «Свои координаты» (не ключ пресета). */
-  const [geoCustomDraft, setGeoCustomDraft] = useState("");
-  const [aiMeta, setAiMeta] = useState<ApiJson | null>(null);
-  /** Задачи, запущенные с этой страницы — ждём success для предложения скачать. */
-  const [downloadWatchIds, setDownloadWatchIds] = useState<number[]>([]);
-  /** Успешно завершённые, показываем блок с кнопками скачать. */
-  const [downloadOfferIds, setDownloadOfferIds] = useState<number[]>([]);
-  const [downloadingTaskId, setDownloadingTaskId] = useState<number | null>(null);
-  const downloadErrorNotifiedRef = useRef<Set<number>>(new Set());
-  /** Уже перенесли в «скачать» — чтобы не терять из‑за повторных вызовов updater / опросов. */
-  const downloadPromotedRef = useRef<Set<number>>(new Set());
-  const downloadWatchIdsRef = useRef<number[]>([]);
-  downloadWatchIdsRef.current = downloadWatchIds;
-  const progressVisibleRef = useRef(false);
-
-  const settingsQ = useQuery({
-    queryKey: ["uq-settings", tenantId],
-    queryFn: () => apiFetch<ApiJson>("/api/uniqualizer/settings", { tenantId }),
-    staleTime: 60_000,
-    refetchOnWindowFocus: false,
-  });
-  const profilesQ = useQuery({
-    queryKey: ["profiles", tenantId],
-    queryFn: () => apiFetch<ApiJson>("/api/profiles", { tenantId }),
-  });
-  const progressQ = useQuery({
-    queryKey: ["render-progress", tenantId],
-    queryFn: () => apiFetch<ApiJson>("/api/pipeline/render-progress", { tenantId }),
-    refetchInterval: 2000,
-  });
-  const progressVisibleForPoll = Boolean(progressQ.data?.visible);
-  const tasksQ = useQuery({
-    queryKey: ["tasks", tenantId],
-    queryFn: () => apiFetch<ApiJson>("/api/tasks?limit=100", { tenantId }),
-    refetchInterval: downloadWatchIds.length > 0 || progressVisibleForPoll ? 2000 : false,
-  });
-
-  const runTaskDownload = useCallback(
-    async (taskId: number): Promise<void> => {
-      setDownloadingTaskId(taskId);
-      try {
-        await downloadTaskMp4(taskId, tenantId);
-      } catch (e) {
-        setToast({ msg: e instanceof Error ? e.message : "Не удалось скачать файл", kind: "err" });
-      } finally {
-        setDownloadingTaskId((x) => (x === taskId ? null : x));
-      }
-    },
-    [tenantId],
-  );
-
-  useEffect(() => {
-    if (!settingsQ.data) return;
-    setSettings((prev) => {
-      const d = settingsQ.data as UqSettings;
-      const next: UqSettings = subtitleTouched ? { ...d, subtitle: prev.subtitle } : { ...d };
-      // Справочники с GET не должны пропадать из стейта при частичных/старых ответах.
-      if (
-        (!next.available_geo_profiles || Object.keys(next.available_geo_profiles).length === 0) &&
-        prev.available_geo_profiles &&
-        Object.keys(prev.available_geo_profiles).length > 0
-      ) {
-        next.available_geo_profiles = prev.available_geo_profiles;
-      }
-      // Не затирать выбранный шрифт «пустым» ответом (гонка refetch до того, как POST /settings дошёл до API).
-      const prevFont = (prev.subtitle_font ?? "").trim();
-      const nextFont = (next.subtitle_font ?? "").trim();
-      if (prevFont && !nextFont) {
-        next.subtitle_font = prevFont;
-      }
-      return next;
-    });
-  }, [settingsQ.data, subtitleTouched]);
-
-  /** После закрытия прогресса подтягиваем задачи — иначе success мог прийти в БД между опросами. */
-  useEffect(() => {
-    const v = Boolean(progressQ.data?.visible);
-    if (progressVisibleRef.current && !v) {
-      void qc.invalidateQueries({ queryKey: ["tasks", tenantId] });
-    }
-    progressVisibleRef.current = v;
-  }, [progressQ.data?.visible, qc, tenantId]);
-
-  useEffect(() => {
-    const raw = tasksQ.data?.tasks;
-    if (!Array.isArray(raw)) return;
-
-    const tasks = raw as ApiJson[];
-    const watch = downloadWatchIdsRef.current;
-    if (!watch.length) return;
-
-    const still: number[] = [];
-    const ready: number[] = [];
-    const errs: number[] = [];
-    for (const id of watch) {
-      const t = tasks.find((x) => Number(x.id) === id);
-      if (!t) {
-        still.push(id);
-        continue;
-      }
-      const st = String(t.status || "");
-      const uv = t.unique_video;
-      if (st === "success" && (typeof uv === "string" ? uv.trim() : String(uv || "").trim())) {
-        ready.push(id);
-      } else if (st === "error") {
-        errs.push(id);
-      } else {
-        still.push(id);
-      }
-    }
-
-    const sameWatch =
-      still.length === watch.length && still.every((id, i) => id === watch[i]);
-    if (!sameWatch) {
-      setDownloadWatchIds(still);
-    }
-
-    const freshReady = ready.filter((id) => !downloadPromotedRef.current.has(id));
-    if (freshReady.length > 0) {
-      for (const id of freshReady) {
-        downloadPromotedRef.current.add(id);
-      }
-      setDownloadOfferIds((o) => [...new Set([...o, ...freshReady])]);
-      setToast({
-        msg:
-          freshReady.length === 1
-            ? "Рендер готов — запускаем скачивание."
-            : `Готово файлов: ${freshReady.length}. Скачивание по очереди (пауза между файлами)…`,
-        kind: "ok",
-      });
-      void (async () => {
-        for (let i = 0; i < freshReady.length; i++) {
-          if (i > 0) {
-            await new Promise((r) => setTimeout(r, 650));
-          }
-          await runTaskDownload(freshReady[i]);
-        }
-      })();
-    }
-
-    for (const id of errs) {
-      if (downloadErrorNotifiedRef.current.has(id)) continue;
-      downloadErrorNotifiedRef.current.add(id);
-      setToast({ msg: `Задача #${id} завершилась с ошибкой (файл не сформирован).`, kind: "err" });
-    }
-  }, [tasksQ.data, tasksQ.dataUpdatedAt, runTaskDownload]);
-
-  useEffect(() => {
-    if (!toast) return;
-    const id = window.setTimeout(() => setToast(null), 3500);
-    return () => window.clearTimeout(id);
-  }, [toast]);
-
-  const profiles = useMemo(() => {
-    const rows = ((profilesQ.data as ApiJson | undefined)?.profiles as ApiJson[] | undefined) ?? [];
-    return rows.map((p) => String(p.adspower_id || "")).filter(Boolean);
-  }, [profilesQ.data]);
-
-  const presetOptions = useMemo(() => normalizeOptions(settings.available_presets), [settings.available_presets]);
-  const templateOptions = useMemo(() => normalizeOptions(settings.available_templates), [settings.available_templates]);
-  const blendOptions = useMemo(() => normalizeOptions(settings.available_overlay_blends), [settings.available_overlay_blends]);
-
-  const geoOptions = useMemo((): OptionItem[] => {
-    const raw = settings.available_geo_profiles;
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      const keys = Object.keys(raw);
-      if (keys.length > 0) {
-        return keys.map((k) => {
-          const kk = k.toLowerCase();
-          const entry = raw[k] as Record<string, unknown>;
-          const en = GEO_CITY_EN_LINE[kk];
-          const labApi =
-            typeof entry.label === "string" && entry.label.trim() ? entry.label.trim() : k.replace(/_/g, " ");
-          return { value: kk, label: en || labApi };
-        });
-      }
-    }
-    return Object.keys(GEO_CITY_EN_LINE).map((k) => ({ value: k, label: GEO_CITY_EN_LINE[k] }));
-  }, [settings.available_geo_profiles]);
-
-  const geoPresetKeySet = useMemo(() => new Set(geoOptions.map((o) => o.value)), [geoOptions]);
-
-  const geoSelectValue = useMemo(() => {
-    const raw = (settings.geo_profile || "").trim().toLowerCase();
-    if (!raw) return "__custom__";
-    if (geoPresetKeySet.has(raw)) return raw;
-    return "__custom__";
-  }, [settings.geo_profile, geoPresetKeySet]);
-
-  useEffect(() => {
-    const p = (settings.geo_profile || "").trim();
-    const k = p.toLowerCase();
-    if (geoPresetKeySet.has(k)) {
-      setGeoCustomDraft("");
-      return;
-    }
-    setGeoCustomDraft(p ? geoKeyToDisplayLine(p) : "");
-  }, [settings.geo_profile, geoPresetKeySet]);
-
-  function commitCustomGeoProfile(): void {
-    if (geoSelectValue !== "__custom__") return;
-    flushSync(() => {
-      setSettings((s) => ({
-        ...s,
-        geo_profile: parseGeoDisplayToProfile(geoCustomDraft),
-      }));
-    });
-  }
-
-  const geoLine = useMemo(() => {
-    if (settings.geo_enabled === false) return "выкл.";
-    return geoKeyToDisplayLine(settings.geo_profile || "busan");
-  }, [settings.geo_enabled, settings.geo_profile]);
-
-  const deviceModelOptions = useMemo(
-    () => normalizeOptions(settings.available_device_models),
-    [settings.available_device_models],
-  );
-  const intensityOptions = useMemo(() => {
-    const raw = settings.available_uniqualize_intensity;
-    if (raw && typeof raw === "object") {
-      return Object.entries(raw).map(([k, v]) => ({
-        value: k,
-        label: String((v as { label?: string })?.label ?? k),
-      }));
-    }
-    return [
-      { value: "low", label: "Мягко" },
-      { value: "med", label: "Норма" },
-      { value: "high", label: "Сильнее" },
-    ];
-  }, [settings.available_uniqualize_intensity]);
-  const deviceModelPresetValues = useMemo(
-    () => new Set(deviceModelOptions.map((o) => o.value)),
-    [deviceModelOptions],
-  );
-  const deviceModelSelectValue = useMemo(() => {
-    if (deviceModelOptions.length === 0) return DEVICE_MODEL_CUSTOM;
-    const m = (settings.device_model || "").trim();
-    if (m && deviceModelPresetValues.has(m)) return m;
-    if (m) return DEVICE_MODEL_CUSTOM;
-    return deviceModelOptions[0]?.value || DEVICE_MODEL_CUSTOM;
-  }, [settings.device_model, deviceModelPresetValues, deviceModelOptions]);
-
-  const enabledEffectsCount = useMemo(() => {
-    const ex = settings.effects || {};
-    return Object.values(ex).filter(Boolean).length;
-  }, [settings.effects]);
-
-  /** Оценка уровня защиты (0–100) на основе текущих настроек. */
-  const protectionScore = useMemo(() => {
-    const intensity = settings.uniqualize_intensity || "med";
-    let score = intensity === "high" ? 72 : intensity === "low" ? 42 : 58;
-    score += Math.min(enabledEffectsCount * 4, 16);
-    if (rotateTemplates) score += 6;
-    if (randomizeEffects) score += 8;
-    return Math.min(95, Math.max(30, score));
-  }, [settings.uniqualize_intensity, enabledEffectsCount, rotateTemplates, randomizeEffects]);
-
-  useEffect(() => {
-    if (!videoFile) {
-      setVideoBlobUrl(null);
-      return;
-    }
-    const u = URL.createObjectURL(videoFile);
-    setVideoBlobUrl(u);
-    return () => URL.revokeObjectURL(u);
-  }, [videoFile]);
-
-  const serverVideoPreviewUrl = useMemo(() => {
-    const base = storedUploadBasenameFromPath(videoPath);
-    if (!base) return null;
-    const q = new URLSearchParams({ tenant: tenantId });
-    return `${apiUrl(`/api/uploads/video/${encodeURIComponent(base)}`)}?${q}`;
-  }, [videoPath, tenantId]);
-
-  const videoPreviewSrc = videoBlobUrl ?? serverVideoPreviewUrl;
-
-  const effects = settings.effects || {};
-  const availableEffects = settings.available_effects || { mirror: "Mirror", noise: "Noise", speed: "Speed" };
-  const availableEffectLevels = settings.available_effect_levels || DEFAULT_EFFECT_LEVELS;
-
-  const hasVideo = Boolean(videoPath.trim());
-  const hasStyle = Boolean((settings.preset || "deep") && (settings.template || "default"));
-  const hasEffects = effectsReviewed || Object.values(effects).some(Boolean);
-  const overlayIsUserUpload = pathLooksLikeTenantUpload(String(settings.overlay_media_path || ""));
-  const hasLayers =
-    layersReviewed ||
-    overlayIsUserUpload ||
-    Boolean(settings.subtitle_srt_path) ||
-    Boolean((settings.subtitle || "").trim());
-  const allStepsReady = hasVideo && hasStyle && hasEffects && hasLayers;
-
-  const maxReachableStep =
-    flowMode === "free"
-      ? 5
-      : !hasVideo
-        ? 1
-        : !hasStyle
-          ? 2
-          : !hasEffects
-            ? 3
-            : !hasLayers
-              ? 4
-              : 5;
-
-  const stepNavOpen = (step: number) =>
-    flowMode === "free" || allStepsReady || step <= maxReachableStep;
-
-  useEffect(() => {
-    if (activeStep > maxReachableStep) setActiveStep(maxReachableStep);
-  }, [activeStep, maxReachableStep]);
-
-  async function persistSettingsToServer(): Promise<void> {
-    await apiFetch("/api/uniqualizer/settings", { method: "POST", tenantId, body: JSON.stringify(settings) });
-    await qc.invalidateQueries({ queryKey: ["uq-settings", tenantId] });
-  }
-
-  /** Сохранить часть настроек слоёв без гонки со старым state. */
-  function persistLayerPatch(patch: Partial<UqSettings>, okMsg?: string): void {
-    setSettings((prev) => {
-      const merged = { ...prev, ...patch };
-      void (async () => {
-        try {
-          await apiFetch("/api/uniqualizer/settings", { method: "POST", tenantId, body: JSON.stringify(merged) });
-          await qc.invalidateQueries({ queryKey: ["uq-settings", tenantId] });
-          if (okMsg) setToast({ msg: okMsg, kind: "ok" });
-        } catch (e) {
-          setToast({ msg: e instanceof Error ? e.message : "Не удалось сохранить", kind: "err" });
-        }
-      })();
-      return merged;
-    });
-  }
-
-  const saveSettingsMut = useMutation({
-    mutationFn: () => apiFetch("/api/uniqualizer/settings", { method: "POST", tenantId, body: JSON.stringify(settings) }),
-    onSuccess: async () => {
-      setSubtitleTouched(false);
-      setToast({ msg: "Настройки уникализатора сохранены", kind: "ok" });
-      await qc.invalidateQueries({ queryKey: ["uq-settings", tenantId] });
-    },
-    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-  });
-
-  const uploadMut = useMutation({
-    mutationFn: async ({ file, purpose }: { file: File; purpose: "video" | "overlay" | "srt" }) => {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("purpose", purpose);
-      return apiFetch<ApiJson>("/api/upload", { method: "POST", tenantId, body: fd });
-    },
-  });
-
-  const aiPreviewMut = useMutation({
-    mutationFn: () =>
-      apiFetch<ApiJson>("/api/ai/preview", {
-        method: "POST",
-        tenantId,
-        body: JSON.stringify({ niche: (settings.niche || "YouTube Shorts").trim() || "YouTube Shorts" }),
-      }),
-    onSuccess: (data: ApiJson) => {
-      setAiMeta(data);
-      setToast({ msg: "AI-метаданные сгенерированы", kind: "ok" });
-    },
-    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-  });
-
-  const fillSubtitleFromAi = useCallback(async () => {
-    try {
-      let d: ApiJson = aiMeta || {};
-      if (!snippetFromAiMeta(d)) {
-        d = await apiFetch<ApiJson>("/api/ai/preview", {
-          method: "POST",
-          tenantId,
-          body: JSON.stringify({ niche: (settings.niche || "YouTube Shorts").trim() || "YouTube Shorts" }),
-        });
-        setAiMeta(d);
-      }
-      const s = snippetFromAiMeta(d);
-      if (!s) {
-        setToast({ msg: "AI не вернул текст — проверьте ключ Groq в настройках.", kind: "err" });
-        return;
-      }
-      setSubtitleTouched(true);
-      setSettings((prev) => ({ ...prev, subtitle: s }));
-      setToast({ msg: "Текст на видео вставлен из AI (overlay/title)", kind: "ok" });
-    } catch (e) {
-      setToast({ msg: e instanceof Error ? e.message : "Ошибка AI", kind: "err" });
-    }
-  }, [aiMeta, settings.niche, tenantId]);
-
-  const runMut = useMutation({
-    mutationFn: async () => {
-      if (!videoPath.trim()) throw new Error("Укажите исходное видео");
-      await persistSettingsToServer();
-      await apiFetch("/api/pipeline/start", { method: "POST", tenantId });
-      const sub = (settings.subtitle || "").trim();
-      const created = await apiFetch<ApiJson>("/api/tasks", {
-        method: "POST",
-        tenantId,
-        body: JSON.stringify({
-          original_video: videoPath.trim(),
-          target_profile: targetProfile.trim(),
-          render_only: renderOnly,
-          check_duplicates: checkDuplicates,
-          ...(sub ? { subtitle: sub } : {}),
-          ...(settings.template ? { template: settings.template } : {}),
-        }),
-      });
-      const taskId = taskIdFromPayload(created);
-      if (taskId > 0) {
-        await apiFetch("/api/pipeline/enqueue", { method: "POST", tenantId, body: JSON.stringify({ task_id: taskId }) });
-      }
-      return created;
-    },
-    onSuccess: async (created) => {
-      setToast({ msg: "Рендер поставлен в очередь", kind: "ok" });
-      const taskId = taskIdFromPayload(created);
-      if (taskId > 0) {
-        setDownloadWatchIds((p) => [...new Set([...p, taskId])]);
-        await qc.invalidateQueries({ queryKey: ["tasks", tenantId] });
-      }
-    },
-    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-  });
-
-  const variantsMut = useMutation({
-    mutationFn: async () => {
-      await persistSettingsToServer();
-      const rawLines = variantsSubtitlesText.split(/\r?\n/);
-      const useLines = variantsSubtitlesText.trim().length > 0;
-      let subtitles: string[] | undefined;
-      if (useLines) {
-        if (rawLines.length !== variantsCount) {
-          throw new Error(`В поле CTA для variants нужно ровно ${variantsCount} строк (сейчас ${rawLines.length}).`);
-        }
-        subtitles = rawLines.map((l) => l.trim());
-      }
-      const oneSub = (settings.subtitle || "").trim();
-      return apiFetch("/api/variants/generate", {
-        method: "POST",
-        tenantId,
-        body: JSON.stringify({
-          source_video: videoPath.trim(),
-          target_profile: targetProfile.trim(),
-          render_only: renderOnly,
-          count: variantsCount,
-          enqueue: true,
-          auto_start_pipeline: true,
-          ...(subtitles ? { subtitles } : oneSub ? { subtitle: oneSub } : {}),
-          ...(rotateTemplates ? { rotate_templates: true } : settings.template ? { template: settings.template } : {}),
-          ...(randomizeEffects ? { randomize_effects: true } : {}),
-          ...(randomizeDeviceGeo ? { randomize_device_geo: true } : {}),
-          ...(variantsPriority !== 0 ? { priority: variantsPriority } : {}),
-        }),
-      });
-    },
-    onSuccess: async (data) => {
-      setToast({ msg: "Пакет вариаций создан", kind: "ok" });
-      const raw = data.created_ids;
-      const ids = Array.isArray(raw) ? raw.map((x) => Number(x)).filter((n) => n > 0) : [];
-      if (ids.length) {
-        setDownloadWatchIds((p) => [...new Set([...p, ...ids])]);
-        await qc.invalidateQueries({ queryKey: ["tasks", tenantId] });
-      }
-    },
-    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-  });
-
-  const previewMut = useMutation({
-    mutationFn: () =>
-      apiFetch<ApiJson>("/api/render/preview", {
-        method: "POST",
-        tenantId,
-        body: JSON.stringify({
-          source_video: videoPath.trim(),
-          preview_duration_sec: 10,
-          ...(settings.preset ? { preset: settings.preset } : {}),
-          ...(settings.template ? { template: settings.template } : {}),
-          ...(settings.effects ? { effects: settings.effects } : {}),
-        }),
-      }),
-    onSuccess: (data) => {
-      setToast({ msg: `Превью готово: task #${data.task_id ?? data.id ?? "?"}`, kind: "ok" });
-    },
-    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-  });
-
-  const cancelMut = useMutation({
-    mutationFn: (taskId: number) => apiFetch(`/api/tasks/${taskId}/cancel`, { method: "POST", tenantId }),
-    onSuccess: () => setToast({ msg: "Отмена отправлена в пайплайн", kind: "ok" }),
-    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-  });
-  const stopPipelineMut = useMutation({
-    mutationFn: () => apiFetch("/api/pipeline/stop", { method: "POST", tenantId }),
-    onSuccess: async () => {
-      setToast({ msg: "Пайплайн остановлен", kind: "ok" });
-      await qc.invalidateQueries({ queryKey: ["render-progress", tenantId] });
-    },
-    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-  });
-  const restartQueueMut = useMutation({
-    mutationFn: async () => {
-      await apiFetch("/api/pipeline/stop", { method: "POST", tenantId });
-      await apiFetch("/api/pipeline/start", { method: "POST", tenantId });
-      return apiFetch<ApiJson>("/api/pipeline/enqueue-pending", { method: "POST", tenantId });
-    },
-    onSuccess: async (data: ApiJson) => {
-      const n = Number(data.enqueued || 0);
-      setToast({ msg: `Очередь перезапущена${n > 0 ? `, добавлено задач: ${n}` : ""}`, kind: "ok" });
-      await qc.invalidateQueries({ queryKey: ["render-progress", tenantId] });
-    },
-    onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-  });
-
-  const progressVisible = Boolean(progressQ.data?.visible);
-  const progressTaskId = Number(progressQ.data?.task_id || 0);
-  const progressPercent = Number(progressQ.data?.percent || 0);
-  const canRun =
-    hasVideo &&
-    !runMut.isPending &&
-    !variantsMut.isPending &&
-    (renderOnly || Boolean(targetProfile.trim()));
-  const canGoToRender = hasVideo && hasStyle && hasEffects && hasLayers;
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.key !== "Enter") return;
-      if (!canRun || !canGoToRender || runMut.isPending) return;
-      e.preventDefault();
-      runMut.mutate();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [canRun, canGoToRender, runMut]);
-
-  function uploadSelectedVideo(file: File): void {
-    uploadMut.mutate(
-      { file, purpose: "video" },
-      {
-        onSuccess: (d) => {
-          const p = String(d.path || "");
-          if (p) setVideoPath(p);
-          setToast({ msg: "Видео загружено", kind: "ok" });
-        },
-        onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-      },
-    );
-  }
-
-  function uploadSelectedOverlay(file: File): void {
-    uploadMut.mutate(
-      { file, purpose: "overlay" },
-      {
-        onSuccess: (d) => {
-          setOverlayFile(null);
-          setSettings((s) => ({ ...s, overlay_media_path: String(d.overlay_media_path || d.path || "") }));
-          setToast({ msg: "Overlay загружен", kind: "ok" });
-        },
-        onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-      },
-    );
-  }
-
-  function uploadSelectedSrt(file: File): void {
-    uploadMut.mutate(
-      { file, purpose: "srt" },
-      {
-        onSuccess: (d) => {
-          setSrtFile(null);
-          setSettings((s) => ({ ...s, subtitle_srt_path: String(d.subtitle_srt_path || d.path || "") }));
-          setToast({ msg: "SRT загружен", kind: "ok" });
-        },
-        onError: (e: Error) => setToast({ msg: e.message, kind: "err" }),
-      },
-    );
-  }
-
-  useEffect(() => {
-    if (!videoFile) return;
-    uploadSelectedVideo(videoFile);
-  // intentionally reacts to selected file; mutation state prevents duplicate submit while pending
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoFile]);
-
-  useEffect(() => {
-    if (!overlayFile) return;
-    uploadSelectedOverlay(overlayFile);
-  // intentionally reacts to selected file once
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overlayFile]);
-
-  useEffect(() => {
-    if (!srtFile) return;
-    uploadSelectedSrt(srtFile);
-  // intentionally reacts to selected file once
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [srtFile]);
-
-  function goStep(next: number): void {
-    if (flowMode === "free" || allStepsReady || next <= maxReachableStep) {
-      setActiveStep(next);
-      return;
-    }
-    setToast({ msg: `Сначала завершите шаги 1–${maxReachableStep}`, kind: "err" });
-  }
-
-  /** Применить пользовательский пресет уникализации. */
-  function applyUiPreset(key: UiPresetKey): void {
-    const p = UI_PRESETS.find((x) => x.key === key);
-    if (!p) return;
-    setActiveUiPreset(key);
-    setSettings((s) => ({
-      ...s,
-      preset: p.backendPreset,
-      uniqualize_intensity: p.intensity,
-      ...(p.enableAllEffects && s.available_effects
-        ? { effects: Object.fromEntries(Object.keys(s.available_effects).map((k) => [k, true])) }
-        : {}),
-    }));
-  }
-
-  /** Один клик — оптимальные настройки для UBT-арбитражного трафика. */
-  function applyUbtPreset(): void {
-    setSettings((s) => ({
-      ...s,
-      uniqualize_intensity: "high",
-      template: "ugc",
-      preset: "deep",
-      niche: "YouTube Shorts",
-    }));
-    setRotateTemplates(true);
-    setRandomizeEffects(true);
-    setRandomizeDeviceGeo(true);
-    setToast({ msg: "UBT пресет применён: deep · ugc · intensity high · рандом включён", kind: "ok" });
-  }
-
-  function shortPath(p: string, maxLen = 52): string {
-    const s = (p || "").trim();
-    if (!s) return "—";
-    if (s.length <= maxLen) return s;
-    return `…${s.slice(-(maxLen - 1))}`;
-  }
-
-  function formatBytes(n: number): string {
-    if (!Number.isFinite(n) || n < 0) return "—";
-    if (n < 1024) return `${Math.round(n)} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
-  function clearVideo(): void {
-    setVideoPath("");
-    setVideoFile(null);
-  }
-
-  async function handleDownloadTask(taskId: number): Promise<void> {
-    await runTaskDownload(taskId);
-  }
-
-  const completedSteps = [hasVideo, hasStyle, hasEffects, hasLayers, allStepsReady].filter(Boolean).length;
-  const wizardProgressPct = Math.round((completedSteps / 5) * 100);
-
-
+new_jsx = r"""
   return (
     <section className="page uq2-page">
       <style>{`
@@ -1041,20 +18,18 @@ export function UniqualizerPage() {
         .uq2-mode-toggle{display:flex;gap:2px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:3px}
         .uq2-mode-btn{padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;color:var(--text-secondary);background:transparent;border:none;cursor:pointer;transition:all 160ms}
         .uq2-mode-btn.active{background:var(--bg-elevated);color:var(--text-primary);box-shadow:0 1px 4px rgba(0,0,0,.35)}
-        .uq2-stepper{display:flex;align-items:flex-start;margin-bottom:22px;padding:0 2px}
-        .uq2-step{display:flex;flex-direction:column;align-items:center;gap:7px;cursor:pointer;transition:opacity 180ms;flex:0 0 auto;min-width:64px}
-        .uq2-step.locked{pointer-events:none;opacity:.28}
-        .uq2-step-dot{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;border:2px solid rgba(255,255,255,0.07);background:var(--bg-elevated);color:var(--text-tertiary);transition:all 240ms cubic-bezier(.4,0,.2,1);position:relative;z-index:1}
-        .uq2-step:hover:not(.locked) .uq2-step-dot{border-color:rgba(255,255,255,0.15);color:var(--text-secondary)}
-        .uq2-step.active .uq2-step-dot{border-color:var(--accent-cyan);color:var(--accent-cyan);background:rgba(94,234,212,.08);box-shadow:0 0 0 4px rgba(94,234,212,.12),0 0 20px rgba(94,234,212,.22);transform:scale(1.06)}
-        .uq2-step.done .uq2-step-dot{background:rgba(94,234,212,.12);border-color:rgba(94,234,212,.55);color:var(--accent-cyan);box-shadow:0 0 0 3px rgba(94,234,212,.07)}
-        .uq2-step-label{font-size:11px;font-weight:600;color:var(--text-tertiary);text-align:center;white-space:nowrap;letter-spacing:-.15px;transition:color 200ms}
-        .uq2-step.active .uq2-step-label{color:var(--accent-cyan)}
-        .uq2-step.done .uq2-step-label{color:var(--text-secondary)}
-        .uq2-step-conn{flex:1;display:flex;align-items:center;padding-top:20px}
-        .uq2-step-line{height:2px;width:100%;background:rgba(255,255,255,0.05);border-radius:1px;transition:background 500ms ease}
-        .uq2-step-line.done{background:linear-gradient(90deg,rgba(94,234,212,.45),rgba(94,234,212,.18))}
-        .uq2-layout{display:grid;grid-template-columns:1fr 320px;gap:14px;align-items:start}
+        .uq2-stepper{display:flex;align-items:flex-start;margin-bottom:18px}
+        .uq2-step{display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;transition:opacity 160ms;flex:0 0 auto;min-width:56px}
+        .uq2-step.locked{pointer-events:none;opacity:.38}
+        .uq2-step-dot{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;border:1.5px solid rgba(255,255,255,0.1);background:var(--bg-surface);color:var(--text-tertiary);transition:all 200ms;position:relative;z-index:1}
+        .uq2-step.active .uq2-step-dot{border-color:var(--accent-cyan);color:var(--accent-cyan);box-shadow:0 0 0 3px rgba(94,234,212,.1),0 0 12px rgba(94,234,212,.18)}
+        .uq2-step.done .uq2-step-dot{background:rgba(94,234,212,.1);border-color:rgba(94,234,212,.45);color:var(--accent-cyan)}
+        .uq2-step-label{font-size:10px;font-weight:600;color:var(--text-tertiary);text-align:center;white-space:nowrap}
+        .uq2-step.active .uq2-step-label,.uq2-step.done .uq2-step-label{color:var(--text-secondary)}
+        .uq2-step-conn{flex:1;display:flex;align-items:center;padding-top:15px}
+        .uq2-step-line{height:1.5px;width:100%;background:rgba(255,255,255,0.07);border-radius:1px;transition:background 400ms}
+        .uq2-step-line.done{background:rgba(94,234,212,.28)}
+        .uq2-layout{display:grid;grid-template-columns:1fr 272px;gap:14px;align-items:start}
         .uq2-main{display:flex;flex-direction:column;gap:14px;min-width:0}
         .uq2-card{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--radius-xl);overflow:hidden}
         .uq2-card-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border-subtle);gap:10px;flex-wrap:wrap}
@@ -1156,9 +131,8 @@ export function UniqualizerPage() {
         .uq2-preview-btn:hover:not(:disabled){background:var(--bg-elevated);color:var(--text-primary)}
         .uq2-preview-btn:disabled{opacity:.35;cursor:not-allowed}
         .uq2-sidebar{display:flex;flex-direction:column;gap:10px;position:sticky;top:0}
-        .uq2-video-preview{width:100%;border-radius:var(--radius-xl);overflow:hidden;background:#0a0a0c;border:1px solid var(--border-subtle);display:flex;align-items:center;justify-content:center;min-height:180px}
-        .uq2-video-preview video{width:100%;max-height:380px;object-fit:contain;display:block}
-        .uq2-video-preview-img{width:100%;max-height:380px;object-fit:contain;display:block}
+        .uq2-video-preview{aspect-ratio:9/16;border-radius:var(--radius-xl);overflow:hidden;background:var(--bg-surface);border:1px solid var(--border-subtle);display:flex;align-items:center;justify-content:center;max-height:240px}
+        .uq2-video-preview video{width:100%;height:100%;object-fit:cover}
         .uq2-preview-empty{display:flex;flex-direction:column;align-items:center;gap:8px}
         .uq2-preview-play-ic{width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;color:var(--text-tertiary)}
         .uq2-preview-hint{font-size:10.5px;color:var(--text-tertiary);text-align:center}
@@ -1195,21 +169,15 @@ export function UniqualizerPage() {
         .uq2-toast-x:hover{opacity:1}
         @keyframes uq2-in{from{transform:translateX(16px);opacity:0}to{transform:none;opacity:1}}
         .uq2-prog-overlay{position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:20px}
-        .uq2-prog-modal{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-2xl);padding:26px;max-width:min(680px,94vw);width:100%;box-shadow:var(--shadow-lg)}
+        .uq2-prog-modal{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-2xl);padding:26px;max-width:420px;width:100%;box-shadow:var(--shadow-lg)}
         .uq2-prog-title{font-size:15px;font-weight:700;color:var(--text-primary);margin-bottom:3px}
         .uq2-prog-sub{font-size:11.5px;color:var(--text-secondary);margin-bottom:14px;min-height:17px}
         .uq2-prog-bar-bg{height:5px;background:rgba(255,255,255,.05);border-radius:3px;overflow:hidden;margin-bottom:14px}
         .uq2-prog-bar-fill{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--accent-cyan),rgba(94,234,212,.55));transition:width 400ms ease;box-shadow:0 0 8px rgba(94,234,212,.28)}
-        .uq2-prog-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}
+        .uq2-prog-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
         .uq2-prog-stat-lbl{font-size:9.5px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
         .uq2-prog-stat-val{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:700;color:var(--text-primary)}
-        .uq2-prog-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:4px}
-        .uq2-prog-actions .btn{width:100%;justify-content:center}
-        @media (max-width:640px){
-          .uq2-prog-modal{padding:18px}
-          .uq2-prog-stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-          .uq2-prog-actions{grid-template-columns:1fr}
-        }
+        .uq2-prog-actions{display:flex;gap:7px;margin-top:4px}
         .uq2-dl-box{background:rgba(74,222,128,.06);border:1px solid rgba(74,222,128,.18);border-radius:var(--radius-xl);padding:12px 14px;margin-bottom:12px;display:flex;flex-direction:column;gap:8px}
         .uq2-dl-title{font-size:12.5px;font-weight:700;color:#4ADE80;display:flex;align-items:center;gap:7px}
         .uq2-dl-desc{font-size:11.5px;color:var(--text-secondary)}
@@ -1397,13 +365,18 @@ export function UniqualizerPage() {
                 </div>
                 <div className="uq2-card-body">
                   <div>
-                    <div className="uq2-section-label" style={{ marginBottom: 8 }}>Уровень уникализации</div>
+                    <div className="uq2-section-label" style={{ marginBottom: 8 }}>Пресет обработки</div>
                     <div className="uq2-preset-grid">
-                      {UI_PRESETS.map((p) => (
-                        <div key={p.key} className={`uq2-preset-card${activeUiPreset === p.key ? " sel" : ""}`}
-                          onClick={() => applyUiPreset(p.key)}
+                      {([
+                        { value: "standard", label: "Стандарт", desc: "CRF 26", color: "linear-gradient(90deg,#4A6FA5,#6B8FC7)" },
+                        { value: "soft",     label: "Мягко",    desc: "CRF 22", color: "linear-gradient(90deg,#8B6FA5,#AB8FC7)" },
+                        { value: "deep",     label: "Глубокий", desc: "CRF 23", color: "linear-gradient(90deg,#A5344A,#C75060)" },
+                        { value: "ultra",    label: "Ультра",   desc: "CRF 20", color: "linear-gradient(90deg,#C77830,#E89840)" },
+                      ] as const).map((p) => (
+                        <div key={p.value} className={`uq2-preset-card${(settings.preset || "deep") === p.value ? " sel" : ""}`}
+                          onClick={() => setSettings((s) => ({ ...s, preset: p.value }))}
                           role="button" tabIndex={0}
-                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") applyUiPreset(p.key); }}
+                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSettings((s) => ({ ...s, preset: p.value })); }}
                         >
                           <div className="uq2-preset-swatch" style={{ background: p.color }} />
                           <div className="uq2-preset-name">{p.label}</div>
@@ -1414,148 +387,44 @@ export function UniqualizerPage() {
                   </div>
                   <div>
                     <div className="uq2-section-label" style={{ marginBottom: 8 }}>Шаблон монтажа</div>
-                    <style>{`
-                      .uq2-tmpl-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}
-                      .uq2-tmpl-card{border:1.5px solid var(--border-subtle);border-radius:10px;padding:10px 6px 9px;cursor:pointer;transition:all 200ms cubic-bezier(.4,0,.2,1);background:var(--bg-elevated);display:flex;flex-direction:column;align-items:center;gap:6px;position:relative;overflow:hidden;user-select:none}
-                      .uq2-tmpl-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2.5px;border-radius:10px 10px 0 0;opacity:0;transition:opacity 200ms}
-                      .uq2-tmpl-card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.35);border-color:var(--border-default)}
-                      .uq2-tmpl-card:hover::before,.uq2-tmpl-card.sel::before{opacity:1}
-                      .uq2-tmpl-card.sel{transform:translateY(-1px)}
-                      .uq2-tmpl-diagram{width:52px;height:36px;flex-shrink:0}
-                      .uq2-tmpl-card-name{font-size:11px;font-weight:700;color:var(--text-primary);letter-spacing:-.2px;text-align:center}
-                      .uq2-tmpl-card-tag{font-family:'IBM Plex Mono',monospace;font-size:8px;color:var(--text-tertiary);opacity:.7;text-align:center}
-                      .uq2-tmpl-card[data-tc="blue"]::before{background:linear-gradient(90deg,#3B82F6,#60A5FA)}
-                      .uq2-tmpl-card[data-tc="blue"].sel{border-color:rgba(59,130,246,.5);background:rgba(59,130,246,.07);box-shadow:0 0 0 1px rgba(59,130,246,.15),0 8px 24px rgba(0,0,0,.35)}
-                      .uq2-tmpl-card[data-tc="violet"]::before{background:linear-gradient(90deg,#8B5CF6,#A78BFA)}
-                      .uq2-tmpl-card[data-tc="violet"].sel{border-color:rgba(139,92,246,.5);background:rgba(139,92,246,.07);box-shadow:0 0 0 1px rgba(139,92,246,.15),0 8px 24px rgba(0,0,0,.35)}
-                      .uq2-tmpl-card[data-tc="cyan"]::before{background:linear-gradient(90deg,#06B6D4,#5EEAD4)}
-                      .uq2-tmpl-card[data-tc="cyan"].sel{border-color:rgba(94,234,212,.5);background:rgba(94,234,212,.07);box-shadow:0 0 0 1px rgba(94,234,212,.15),0 8px 24px rgba(0,0,0,.35)}
-                      .uq2-tmpl-card[data-tc="amber"]::before{background:linear-gradient(90deg,#F59E0B,#FBBF24)}
-                      .uq2-tmpl-card[data-tc="amber"].sel{border-color:rgba(251,191,36,.5);background:rgba(251,191,36,.07);box-shadow:0 0 0 1px rgba(251,191,36,.15),0 8px 24px rgba(0,0,0,.35)}
-                      .uq2-tmpl-card[data-tc="green"]::before{background:linear-gradient(90deg,#10B981,#4ADE80)}
-                      .uq2-tmpl-card[data-tc="green"].sel{border-color:rgba(74,222,128,.5);background:rgba(74,222,128,.07);box-shadow:0 0 0 1px rgba(74,222,128,.15),0 8px 24px rgba(0,0,0,.35)}
-                    `}</style>
-                    <div className="uq2-tmpl-grid">
+                    <div className="uq2-tmpl-row">
                       {([
-                        {
-                          value: "default", label: "Стандарт", tag: "норм", tc: "blue",
-                          svg: <svg width="52" height="36" viewBox="0 0 52 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <rect x="1" y="1" width="50" height="34" rx="3" fill="rgba(59,130,246,.07)" stroke="rgba(59,130,246,.28)" strokeWidth="1"/>
-                            <rect x="6" y="7" width="22" height="15" rx="1.5" fill="rgba(59,130,246,.18)" stroke="rgba(59,130,246,.3)" strokeWidth=".5"/>
-                            <polygon points="13,11.5 13,18.5 20,15" fill="rgba(59,130,246,.75)"/>
-                            <rect x="31" y="7" width="15" height="2.5" rx="1" fill="rgba(59,130,246,.35)"/>
-                            <rect x="31" y="12" width="11" height="2" rx="1" fill="rgba(59,130,246,.2)"/>
-                            <rect x="31" y="16" width="13" height="2" rx="1" fill="rgba(59,130,246,.15)"/>
-                            <rect x="6" y="26" width="40" height="2" rx="1" fill="rgba(59,130,246,.12)"/>
-                            <rect x="6" y="30" width="28" height="2" rx="1" fill="rgba(59,130,246,.08)"/>
-                          </svg>,
-                        },
-                        {
-                          value: "reaction", label: "Реакция", tag: "split", tc: "violet",
-                          svg: <svg width="52" height="36" viewBox="0 0 52 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <rect x="1" y="1" width="28" height="34" rx="3" fill="rgba(139,92,246,.08)" stroke="rgba(139,92,246,.3)" strokeWidth="1"/>
-                            <rect x="5" y="5" width="20" height="26" rx="1.5" fill="rgba(139,92,246,.15)"/>
-                            <polygon points="11,15 11,21 17,18" fill="rgba(139,92,246,.7)"/>
-                            <rect x="32" y="1" width="19" height="21" rx="3" fill="rgba(139,92,246,.07)" stroke="rgba(139,92,246,.25)" strokeWidth="1"/>
-                            <circle cx="41.5" cy="8" r="4" fill="rgba(139,92,246,.2)" stroke="rgba(139,92,246,.4)" strokeWidth=".75"/>
-                            <circle cx="41.5" cy="7" r="1.8" fill="rgba(139,92,246,.6)"/>
-                            <path d="M36 14 Q41.5 12 47 14" stroke="rgba(139,92,246,.5)" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
-                            <rect x="32" y="25" width="19" height="10" rx="3" fill="rgba(139,92,246,.05)" stroke="rgba(139,92,246,.15)" strokeWidth="1"/>
-                            <rect x="35" y="28" width="13" height="1.5" rx=".75" fill="rgba(139,92,246,.25)"/>
-                            <rect x="37" y="31" width="9" height="1.5" rx=".75" fill="rgba(139,92,246,.15)"/>
-                          </svg>,
-                        },
-                        {
-                          value: "news", label: "Новости", tag: "бар", tc: "cyan",
-                          svg: <svg width="52" height="36" viewBox="0 0 52 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <rect x="1" y="1" width="50" height="34" rx="3" fill="rgba(94,234,212,.06)" stroke="rgba(94,234,212,.25)" strokeWidth="1"/>
-                            <rect x="4" y="4" width="44" height="22" rx="1.5" fill="rgba(94,234,212,.1)"/>
-                            <rect x="4" y="26" width="44" height="9" rx="0" fill="rgba(94,234,212,.18)"/>
-                            <rect x="4" y="26" width="44" height="9" rx="0" stroke="rgba(94,234,212,.35)" strokeWidth=".5" fill="none"/>
-                            <rect x="6" y="28" width="10" height="5" rx="1" fill="rgba(94,234,212,.5)"/>
-                            <rect x="19" y="29" width="22" height="1.5" rx=".75" fill="rgba(94,234,212,.35)"/>
-                            <rect x="19" y="32" width="16" height="1.5" rx=".75" fill="rgba(94,234,212,.2)"/>
-                            <rect x="16" y="9" width="20" height="12" rx="1" fill="rgba(94,234,212,.15)" stroke="rgba(94,234,212,.25)" strokeWidth=".5"/>
-                            <polygon points="22,12 22,18 28,15" fill="rgba(94,234,212,.7)"/>
-                          </svg>,
-                        },
-                        {
-                          value: "story", label: "Story", tag: "9:16", tc: "amber",
-                          svg: <svg width="52" height="36" viewBox="0 0 52 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <rect x="18" y="1" width="16" height="34" rx="3" fill="rgba(251,191,36,.07)" stroke="rgba(251,191,36,.35)" strokeWidth="1"/>
-                            <rect x="20.5" y="4" width="11" height="24" rx="1" fill="rgba(251,191,36,.13)"/>
-                            <circle cx="26" cy="33" r="1.5" fill="rgba(251,191,36,.45)"/>
-                            <line x1="15" y1="4" x2="11" y2="4" stroke="rgba(251,191,36,.3)" strokeWidth="1" strokeDasharray="1.5 1.5"/>
-                            <line x1="15" y1="32" x2="11" y2="32" stroke="rgba(251,191,36,.3)" strokeWidth="1" strokeDasharray="1.5 1.5"/>
-                            <line x1="37" y1="4" x2="41" y2="4" stroke="rgba(251,191,36,.3)" strokeWidth="1" strokeDasharray="1.5 1.5"/>
-                            <line x1="37" y1="32" x2="41" y2="32" stroke="rgba(251,191,36,.3)" strokeWidth="1" strokeDasharray="1.5 1.5"/>
-                            <polygon points="23,13 23,19 29,16" fill="rgba(251,191,36,.65)"/>
-                            <rect x="22.5" y="22" width="7" height="1.5" rx=".75" fill="rgba(251,191,36,.3)"/>
-                            <rect x="23.5" y="25" width="5" height="1.5" rx=".75" fill="rgba(251,191,36,.18)"/>
-                          </svg>,
-                        },
-                        {
-                          value: "ugc", label: "UGC", tag: "арбитраж", tc: "green",
-                          svg: <svg width="52" height="36" viewBox="0 0 52 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <rect x="1" y="1" width="50" height="34" rx="3" fill="rgba(74,222,128,.06)" stroke="rgba(74,222,128,.25)" strokeWidth="1"/>
-                            <circle cx="26" cy="15" r="9.5" fill="rgba(74,222,128,.1)" stroke="rgba(74,222,128,.3)" strokeWidth="1"/>
-                            <path d="M26 7.5 L27.8 12.8 L33.5 12.8 L28.9 16.1 L30.7 21.4 L26 18.1 L21.3 21.4 L23.1 16.1 L18.5 12.8 L24.2 12.8 Z" fill="rgba(74,222,128,.72)"/>
-                            <rect x="7" y="29" width="8" height="2" rx="1" fill="rgba(74,222,128,.25)"/>
-                            <rect x="17" y="29" width="18" height="2" rx="1" fill="rgba(74,222,128,.18)"/>
-                            <rect x="37" y="29" width="8" height="2" rx="1" fill="rgba(74,222,128,.12)"/>
-                          </svg>,
-                        },
-                      ]).map((t) => (
-                        <div
-                          key={t.value}
-                          data-tc={t.tc}
-                          className={`uq2-tmpl-card${(settings.template || "default") === t.value ? " sel" : ""}`}
+                        { value: "default",  label: "Стандарт",  badge: "норм" },
+                        { value: "reaction", label: "Реакция",   badge: "split" },
+                        { value: "news",     label: "Новости",   badge: "нижн. бар" },
+                        { value: "story",    label: "Story",     badge: "9:16 zoom" },
+                        { value: "ugc",      label: "UGC",       badge: "★ арбитраж" },
+                      ] as const).map((t) => (
+                        <div key={t.value} className={`uq2-tmpl-chip${(settings.template || "default") === t.value ? " sel" : ""}`}
                           onClick={() => setSettings((s) => ({ ...s, template: t.value }))}
                           role="button" tabIndex={0}
                           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSettings((s) => ({ ...s, template: t.value })); }}
                         >
-                          <div className="uq2-tmpl-diagram">{t.svg}</div>
-                          <div className="uq2-tmpl-card-name">{t.label}</div>
-                          <div className="uq2-tmpl-card-tag">{t.tag}</div>
+                          <div className="uq2-tmpl-name">{t.label}</div>
+                          <div className="uq2-tmpl-badge">{t.badge}</div>
                         </div>
                       ))}
                     </div>
                   </div>
-                  {/* ── Расширенные настройки ──────────────────────────────── */}
                   <div>
-                    <button
-                      type="button"
-                      className="uq2-ghost-btn"
-                      style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", justifyContent: "space-between" }}
-                      onClick={() => setAdvancedOpen((v) => !v)}
-                    >
-                      <span>Расширенные настройки</span>
-                      <ChevronDown size={14} style={{ transition: "transform 200ms", transform: advancedOpen ? "rotate(180deg)" : "rotate(0deg)" }} aria-hidden />
-                    </button>
+                    <div className="uq2-section-label" style={{ marginBottom: 8 }}>Разброс уникализации</div>
+                    <div className="uq2-intensity">
+                      {intensityOptions.map((p) => {
+                        const sel = (settings.uniqualize_intensity || "med") === p.value;
+                        return (
+                          <div key={p.value}
+                            className={`uq2-int-item${sel ? ` sel-${p.value}` : ""}`}
+                            onClick={() => setSettings((s) => ({ ...s, uniqualize_intensity: p.value }))}
+                            role="button" tabIndex={0}
+                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSettings((s) => ({ ...s, uniqualize_intensity: p.value })); }}
+                          >
+                            <div className="uq2-int-label">{p.label}</div>
+                            <div className="uq2-int-key">{p.value.toUpperCase()}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                  {advancedOpen && (
-                    <>
-                      <div>
-                        <div className="uq2-section-label" style={{ marginBottom: 8 }}>Разброс уникализации</div>
-                        <div className="uq2-intensity">
-                          {intensityOptions.map((p) => {
-                            const sel = (settings.uniqualize_intensity || "med") === p.value;
-                            return (
-                              <div key={p.value}
-                                className={`uq2-int-item${sel ? ` sel-${p.value}` : ""}`}
-                                onClick={() => setSettings((s) => ({ ...s, uniqualize_intensity: p.value }))}
-                                role="button" tabIndex={0}
-                                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSettings((s) => ({ ...s, uniqualize_intensity: p.value })); }}
-                              >
-                                <div className="uq2-int-label">{p.label}</div>
-                                <div className="uq2-int-key">{p.value.toUpperCase()}</div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </>
-                  )}
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                     <div>
                       <div className="uq2-field-label" style={{ marginBottom: 5 }}>Ниша для AI</div>
@@ -1578,40 +447,11 @@ export function UniqualizerPage() {
                       )}
                     </div>
                   </div>
-                  {/* Shorts Loop */}
-                  <div style={{ marginTop: 10, padding: "9px 11px", background: "rgba(94,234,212,0.04)", border: "1px solid rgba(94,234,212,0.14)", borderRadius: 7 }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                      <div>
-                        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", letterSpacing: ".01em" }}>
-                          Seamless Loop <span style={{ fontSize: 10, fontWeight: 400, color: "var(--accent-cyan)", marginLeft: 4 }}>Shorts</span>
-                        </div>
-                        <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", marginTop: 2 }}>
-                          Кросс-фейд конец→начало — алгоритм считает каждый автореплей отдельным взвешенным просмотром
-                        </div>
-                      </div>
-                      <label className="uq2-toggle" style={{ flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
-                        <input type="checkbox" checked={settings.shorts_loop ?? false} onChange={(e) => setSettings((s) => ({ ...s, shorts_loop: e.target.checked }))} />
-                        <span className="uq2-toggle-slider" />
-                      </label>
-                    </div>
-                    {settings.shorts_loop && (
-                      <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>Fade {(settings.shorts_loop_fade_sec ?? 0.5).toFixed(1)}s</span>
-                        <input
-                          type="range" min={0.2} max={2.0} step={0.1}
-                          value={settings.shorts_loop_fade_sec ?? 0.5}
-                          style={{ flex: 1, accentColor: "var(--accent-cyan)" }}
-                          onChange={(e) => setSettings((s) => ({ ...s, shorts_loop_fade_sec: Number(e.target.value) }))}
-                        />
-                        <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>2.0s</span>
-                      </div>
-                    )}
-                  </div>
                   <div className="uq2-toolbar">
                     <button type="button" className="uq2-save-btn" disabled={saveSettingsMut.isPending || settingsQ.isLoading} onClick={() => saveSettingsMut.mutate()}>
                       <Save size={13} strokeWidth={1.75} aria-hidden /> Сохранить
                     </button>
-                    <button type="button" className="uq2-next-btn" disabled={!hasVideo} onClick={() => { setSettings((s) => ({ ...s, preset: s.preset || "deep", template: s.template || "default" })); goStep(3); }}>Далее →</button>
+                    <button type="button" className="uq2-next-btn" disabled={!hasStyle} onClick={() => goStep(3)}>Далее →</button>
                   </div>
                 </div>
               </div>
@@ -2014,7 +854,7 @@ export function UniqualizerPage() {
           <div className="uq2-sidebar">
             <div className="uq2-video-preview">
               {videoPreviewSrc ? (
-                <video key={videoPreviewSrc} src={videoPreviewSrc} controls playsInline preload="metadata" style={{ width: "100%", height: "auto", maxHeight: 380, objectFit: "contain", display: "block" }} />
+                <video key={videoPreviewSrc} src={videoPreviewSrc} controls playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
               ) : (
                 <div className="uq2-preview-empty">
                   <div className="uq2-preview-play-ic"><Play size={18} strokeWidth={2} aria-hidden /></div>
@@ -2025,7 +865,7 @@ export function UniqualizerPage() {
 
             <div className="uq2-config-card">
               <div className="uq2-config-title">Конфигурация</div>
-              <div className="uq2-config-row"><span className="uq2-cfg-k">Пресет</span><span className={`uq2-cfg-v${settings.preset ? " hi" : ""}`}>{UI_PRESETS.find((p) => p.key === activeUiPreset)?.label ?? labelFor(presetOptions, settings.preset)}</span></div>
+              <div className="uq2-config-row"><span className="uq2-cfg-k">Пресет</span><span className={`uq2-cfg-v${settings.preset ? " hi" : ""}`}>{labelFor(presetOptions, settings.preset)}</span></div>
               <div className="uq2-config-row"><span className="uq2-cfg-k">Шаблон</span><span className="uq2-cfg-v">{labelFor(templateOptions, settings.template)}</span></div>
               <div className="uq2-config-row"><span className="uq2-cfg-k">Эффекты</span><span className={`uq2-cfg-v${enabledEffectsCount > 0 ? " hi" : ""}`}>{enabledEffectsCount > 0 ? `${enabledEffectsCount} активно` : "—"}</span></div>
               <div className="uq2-config-row"><span className="uq2-cfg-k">Оверлей</span><span className={`uq2-cfg-v${overlayIsUserUpload ? " hi" : ""}`}>{overlayIsUserUpload ? "Задан" : "Встроенный"}</span></div>
@@ -2118,3 +958,8 @@ export function UniqualizerPage() {
     </section>
   );
 }
+"""
+
+content = top + new_jsx
+src.write_text(content, encoding="utf-8")
+print(f"Done. Written {len(content.splitlines())} lines.")

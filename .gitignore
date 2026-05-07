@@ -30,4 +30,10 @@ data/risk_labels.json
 
 # Local agent artifacts
 .claude/projects/
+.claude/worktrees/
 server.err
+server.log
+server_err.log
+
+# Misc junk
+None

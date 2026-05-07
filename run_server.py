@@ -27,6 +27,11 @@ def _find_port(start: int = 8765, attempts: int = 24) -> int:
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure") and sys.stdout.encoding != "utf-8":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure") and sys.stderr.encoding != "utf-8":
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     port = _find_port()
     host = os.environ.get("NEORENDER_HOST", "127.0.0.1").strip() or "127.0.0.1"
     print(f"NeoRender Pro: http://{host}:{port}/ui/", flush=True)

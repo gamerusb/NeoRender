@@ -40,12 +40,26 @@ function statusBadgeClass(status?: string) {
   return "status-frozen";
 }
 
+type SortCol = "id" | "views" | "likes" | "status" | "published_at";
+
 export function AnalyticsPage() {
   const { tenantId } = useTenant();
   const qc = useQueryClient();
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
   const [checkUrl, setCheckUrl] = useState("");
   const [refreshProgress, setRefreshProgress] = useState<{ done: number; total: number } | null>(null);
+  const [sortCol, setSortCol] = useState<SortCol>("id");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  function handleSort(col: SortCol) {
+    if (col === sortCol) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortCol(col); setSortDir("desc"); }
+  }
+
+  function sortIcon(col: SortCol) {
+    if (col !== sortCol) return <span className="th-sort-icon">↕</span>;
+    return <span className="th-sort-icon">{sortDir === "asc" ? "↑" : "↓"}</span>;
+  }
 
   useEffect(() => {
     if (!toast) return;
@@ -73,6 +87,18 @@ export function AnalyticsPage() {
   const banned = rows.filter((r) => r.status === "banned").length;
   const active = rows.filter((r) => r.status === "active").length;
   const likeRate = totalViews > 0 ? (totalLikes / totalViews) * 100 : 0;
+
+  const sortedRows = [...rows].sort((a, b) => {
+    let av: number | string = 0, bv: number | string = 0;
+    if (sortCol === "id") { av = a.id; bv = b.id; }
+    else if (sortCol === "views") { av = Number(a.views || 0); bv = Number(b.views || 0); }
+    else if (sortCol === "likes") { av = Number(a.likes || 0); bv = Number(b.likes || 0); }
+    else if (sortCol === "status") { av = a.status ?? ""; bv = b.status ?? ""; }
+    else if (sortCol === "published_at") { av = a.published_at ?? ""; bv = b.published_at ?? ""; }
+    if (av < bv) return sortDir === "asc" ? -1 : 1;
+    if (av > bv) return sortDir === "asc" ? 1 : -1;
+    return 0;
+  });
 
   async function handleRefreshAll() {
     const urls = rows.map((r) => r.video_url).filter(Boolean) as string[];
@@ -139,10 +165,10 @@ export function AnalyticsPage() {
       )}
 
       <div className="stats-grid-4">
-        <div className="stat-card"><div className="stat-label">Всего видео</div><div className="stat-value cyan">{rows.length}</div></div>
-        <div className="stat-card"><div className="stat-label">Просмотры</div><div className="stat-value">{formatNumber(totalViews)}</div></div>
-        <div className="stat-card"><div className="stat-label">Like rate</div><div className="stat-value green">{likeRate.toFixed(2)}%</div></div>
-        <div className="stat-card"><div className="stat-label">Риски</div><div className="stat-value red">{shadow + banned}</div><div style={{ fontSize:11,color:"var(--text-tertiary)",marginTop:4 }}>shadowban: {shadow} · бан: {banned}</div></div>
+        <div className="stat-card cyan-accent"><div className="stat-label">Всего видео</div><div className="stat-value cyan">{rows.length}</div></div>
+        <div className="stat-card cyan-accent"><div className="stat-label">Просмотры</div><div className="stat-value cyan">{formatNumber(totalViews)}</div></div>
+        <div className="stat-card green-accent"><div className="stat-label">Like rate</div><div className="stat-value green">{likeRate.toFixed(2)}%</div></div>
+        <div className="stat-card red-accent"><div className="stat-label">Риски</div><div className="stat-value red">{shadow + banned}</div><div style={{ fontSize:11,color:"var(--text-tertiary)",marginTop:4 }}>shadowban: {shadow} · бан: {banned}</div></div>
       </div>
 
       <div className="settings-grid">
@@ -205,12 +231,12 @@ export function AnalyticsPage() {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>ID</th>
+                    <th className={`th-sort${sortCol === "id" ? " active" : ""}`} onClick={() => handleSort("id")}>ID{sortIcon("id")}</th>
                     <th>Ссылка</th>
-                    <th>Просмотры</th>
-                    <th>Лайки</th>
-                    <th>Статус</th>
-                    <th>Опубликовано</th>
+                    <th className={`th-sort${sortCol === "views" ? " active" : ""}`} onClick={() => handleSort("views")}>Просмотры{sortIcon("views")}</th>
+                    <th className={`th-sort${sortCol === "likes" ? " active" : ""}`} onClick={() => handleSort("likes")}>Лайки{sortIcon("likes")}</th>
+                    <th className={`th-sort${sortCol === "status" ? " active" : ""}`} onClick={() => handleSort("status")}>Статус{sortIcon("status")}</th>
+                    <th className={`th-sort${sortCol === "published_at" ? " active" : ""}`} onClick={() => handleSort("published_at")}>Опубликовано{sortIcon("published_at")}</th>
                     <th>Пост-анализ</th>
                   </tr>
                 </thead>
@@ -222,15 +248,26 @@ export function AnalyticsPage() {
                       </td>
                     </tr>
                   )}
-                  {!analyticsQ.isError && rows.length === 0 && (
+                  {analyticsQ.isLoading && [1,2,3,4].map((i) => (
+                    <tr key={i} className="skeleton-row">
+                      <td><div className="skeleton skeleton-cell" style={{ width: 30 }} /></td>
+                      <td><div className="skeleton skeleton-cell" style={{ width: 220 }} /></td>
+                      <td><div className="skeleton skeleton-cell" style={{ width: 60 }} /></td>
+                      <td><div className="skeleton skeleton-cell" style={{ width: 40 }} /></td>
+                      <td><div className="skeleton skeleton-cell" style={{ width: 60 }} /></td>
+                      <td><div className="skeleton skeleton-cell" style={{ width: 80 }} /></td>
+                      <td><div className="skeleton skeleton-cell" style={{ width: 160 }} /></td>
+                    </tr>
+                  ))}
+                  {!analyticsQ.isError && !analyticsQ.isLoading && rows.length === 0 && (
                     <tr>
                       <td colSpan={7}>
                         <div className="empty-state">Пока нет записей аналитики (после успешных заливов появятся URL).</div>
                       </td>
                     </tr>
                   )}
-                  {!analyticsQ.isError &&
-                    rows.map((row) => (
+                  {!analyticsQ.isError && !analyticsQ.isLoading &&
+                    sortedRows.map((row) => (
                       <tr key={row.id}>
                         <td>{row.id}</td>
                         <td className="task-title" title={escapeHtml(row.video_url || "")}>
